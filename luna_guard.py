@@ -108,14 +108,14 @@ def get_key():
     if k:
         return k
     try:
-        return json.loads(CONFIG.read_text()).get("abusech_key", "").strip()
+        return json.loads(CONFIG.read_text(encoding="utf-8")).get("abusech_key", "").strip()
     except Exception:
         return ""
 
 
 def save_key(k):
     APP_DIR.mkdir(parents=True, exist_ok=True)
-    CONFIG.write_text(json.dumps({"abusech_key": k.strip()}))
+    CONFIG.write_text(json.dumps({"abusech_key": k.strip()}), encoding="utf-8")
 
 
 _YARA = {"rules": None, "tried": False}
@@ -515,7 +515,7 @@ def powershell_history():
 # ---------------------------------------------------------------- กักกัน / กำจัด
 def load_index():
     try:
-        return json.loads(QUAR_INDEX.read_text())
+        return json.loads(QUAR_INDEX.read_text(encoding="utf-8"))
     except Exception:
         return {}
 
@@ -527,7 +527,7 @@ def quarantine_file(path, sha, why):
     shutil.move(path, dest)
     idx = load_index()
     idx[qid] = {"original": path, "sha256": sha, "why": why}
-    QUAR_INDEX.write_text(json.dumps(idx, indent=2, ensure_ascii=False))
+    QUAR_INDEX.write_text(json.dumps(idx, indent=2, ensure_ascii=False), encoding="utf-8")
     return qid
 
 
@@ -546,7 +546,7 @@ def cmd_restore(args):
         sys.exit("ไม่พบรหัสนี้")
     shutil.move(QUAR_DIR / f"{args.id}.quar", v["original"])
     del idx[args.id]
-    QUAR_INDEX.write_text(json.dumps(idx, indent=2, ensure_ascii=False))
+    QUAR_INDEX.write_text(json.dumps(idx, indent=2, ensure_ascii=False), encoding="utf-8")
     print(f"[+] กู้ไฟล์กลับไปที่ {v['original']}")
 
 

@@ -178,7 +178,7 @@ class T(unittest.TestCase):
         f = TMP / "loader.ps1"
         f.write_bytes(b'x.DownloadString("http://a");[Convert]::FromBase64String($a);-WindowStyle Hidden')
         _, result = scan()
-        saved = json.loads(lg.HISTORY.read_text())[-1]
+        saved = json.loads(lg.HISTORY.read_text(encoding="utf-8"))[-1]
         self.assertEqual(saved["time"], result["time"])
         self.assertTrue(os.path.samefile(saved["findings"][0]["target"], str(f)))
         self.assertEqual(saved["medium"], 1)
