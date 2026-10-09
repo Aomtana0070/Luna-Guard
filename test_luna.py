@@ -1,4 +1,4 @@
-"""30 test cases ของ Luna Guard  (รัน: python -m unittest -v test_luna)
+"""33 test cases ของ Luna Guard  (รัน: python -m unittest -v test_luna)
 ส่วนที่เป็นคำสั่ง Windows (netstat/schtasks/ipconfig/registry) จำลองผลลัพธ์ด้วย mock - ไฟล์/แฮช/YARA/กักกัน/ฐานข้อมูลทดสอบจริง"""
 import argparse, contextlib, hashlib, io, json, os, struct, sys, tempfile, threading, unittest, zipfile
 from pathlib import Path
@@ -49,7 +49,7 @@ RUNKEY = ("HKCU", r"Software\Microsoft\Windows\CurrentVersion\Run")
 
 def scan(clean=False, paths=None):
     buf = io.StringIO()
-    with contextlib.redirect_stdout(buf):
+    with mock.patch.object(lg, "scan_process_memory", return_value=[]), contextlib.redirect_stdout(buf):
         lg.cmd_scan(argparse.Namespace(clean=clean, full=False, paths=paths or [str(TMP)]))
     return buf.getvalue(), lg.LAST_SCAN
 
@@ -68,6 +68,7 @@ class T(unittest.TestCase):
         dashboard.LANGUAGE_FILE = case_dir / "settings.json"
         dashboard.DEFENDER_STATUS.update(checked=0.0, value={"available": False})
         lg.LAST_SCAN.clear()
+        lg.SCAN_AUDIT.clear()
         CMDS.clear(); FakeReg.data[RUNKEY].clear(); OUT.update(netstat="", sch="", dns="", procs="[]")
 
     def test01_hash_match(self):
@@ -325,7 +326,8 @@ class T(unittest.TestCase):
         finally:
             lg.MAX_ARCHIVE_UNPACKED = old_limit
         self.assertFalse(any(item["kind"] == "Archive member" for item in result["findings"]))
-        self.assertIn("เกินขีดจำกัด", output)
+        self.assertIn("เกินงบข้อมูลคลายบีบอัด", output)
+        self.assertFalse(result["complete"])
 
     def test28_defender_status_and_scan_commands_are_validated(self):
         completed = __import__("subprocess").CompletedProcess(
@@ -367,6 +369,57 @@ class T(unittest.TestCase):
         self.assertEqual(sizes, [(256, 256), (128, 128), (64, 64), (48, 48), (32, 32), (16, 16)])
         self.assertIn('--icon "logo\\Luna_Guard.ico"', (root / "build.bat").read_text(encoding="utf-8"))
         self.assertIn('--icon "logo/Luna_Guard.ico"', (root / ".github" / "workflows" / "windows.yml").read_text(encoding="utf-8"))
+
+    def test31_large_files_are_scanned_without_the_old_size_cap(self):
+        large = TMP / "large.exe"
+        with large.open("wb") as stream:
+            stream.write(b"MZ")
+            stream.truncate(50 * 1024 * 1024 + 1)
+        con = lg.db()
+        severity, reasons, digest = lg.analyze(str(large), con)
+        con.close()
+        self.assertIsNone(severity)
+        self.assertEqual(reasons, [])
+        self.assertEqual(len(digest), 64)
+
+    def test32_memory_scan_checks_every_process_and_reports_denials(self):
+        class FakeMatch:
+            rule = "MemoryThreat"
+            meta = {"severity": "high"}
+
+        def fake_match(pid):
+            if pid == 101:
+                raise PermissionError("access denied")
+            return [FakeMatch()] if pid == 100 else []
+
+        lg.SCAN_AUDIT.clear()
+        output = io.StringIO()
+        with mock.patch.object(lg, "yara_rules", return_value=object()), \
+                mock.patch.object(lg, "yara_scan_process", side_effect=fake_match), \
+                mock.patch.object(lg.os, "getpid", return_value=99), \
+                contextlib.redirect_stdout(output):
+            findings = lg.scan_process_memory([
+                {"ProcessId": 100, "Name": "sample.exe"},
+                {"ProcessId": 101, "Name": "protected.exe"},
+                {"ProcessId": 99, "Name": "LunaGuard.exe"},
+            ])
+        self.assertEqual(len(findings), 1)
+        self.assertEqual(findings[0]["kind"], "หน่วยความจำ")
+        self.assertIn("PID 100", findings[0]["target"])
+        self.assertEqual(lg.SCAN_AUDIT["memory"], {"attempted": 2, "scanned": 1, "denied": 1, "failed": 0})
+        self.assertEqual(lg.SCAN_AUDIT["issues"], 1)
+        self.assertIn("PID 101", output.getvalue())
+
+    def test33_incomplete_memory_scan_cannot_report_clean(self):
+        OUT["procs"] = json.dumps([{"ProcessId": 202, "Name": "protected.exe"}])
+        with mock.patch.object(lg, "yara_scan_process", side_effect=PermissionError("access denied")), \
+                contextlib.redirect_stdout(io.StringIO()):
+            lg.cmd_scan(argparse.Namespace(clean=False, full=False, paths=[str(TMP)]))
+        self.assertFalse(lg.LAST_SCAN["complete"])
+        self.assertEqual(lg.LAST_SCAN["issues"], 1)
+        saved = json.loads(lg.HISTORY.read_text(encoding="utf-8"))[-1]
+        self.assertFalse(saved["complete"])
+        self.assertEqual(saved["audit"]["memory"]["denied"], 1)
 
 
 if __name__ == "__main__":

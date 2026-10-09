@@ -9,6 +9,7 @@ Luna Guard is a Windows desktop helper for scanning and quarantining suspicious 
 - The Windows executable uses the Luna Guard logo as its multi-size `.ico` app/taskbar icon.
 - Scan findings with severity and reasons, plus up to 100 detailed findings per scan in local history.
 - Bounded inspection of supported ZIP-based archives, including macro-enabled Office documents and APKs; a flagged member can quarantine its containing archive.
+- Streaming analysis for regular files of any size, plus direct YARA scanning of every enumerated running process's memory (the scanner excludes its own process).
 - Reversible quarantine; HIGH findings are the only findings handled automatically by remediation. Review MEDIUM and LOW findings yourself.
 - Microsoft Defender status reporting and buttons to request Defender quick or full scans on Windows.
 - Optional YARA scanning with the bundled Luna Guard rules and `yara-python`.
@@ -41,4 +42,4 @@ The executable is not signed. Windows SmartScreen may show an unfamiliar-app war
 
 Threat hashes and indicators are downloaded from [MalwareBazaar](https://bazaar.abuse.ch/), [ThreatFox](https://threatfox.abuse.ch/), and [URLhaus](https://urlhaus.abuse.ch/). YARA rules shipped with the app are maintained in this repository. Update requests contact those services; the app does not upload scanned files or scan history. An abuse.ch Auth-Key, if configured, is stored locally under `%LOCALAPPDATA%\LunaGuard`.
 
-Luna Guard scans on demand; Microsoft Defender provides real-time protection when enabled. Archive inspection has size, entry-count, and nesting limits, and Luna Guard does not directly inspect memory or guarantee detection of every malware family. Downloaded threat intelligence and detection rules can change over time. Neither a clean scan nor a successful update guarantees that a system is safe. Review findings before taking action and retain Microsoft Defender or another maintained endpoint protection product.
+Luna Guard scans on demand; Microsoft Defender provides real-time protection when enabled. Regular files have no scanner size cap and are analyzed in chunks. Archive inspection retains entry-count, expanded-data, and nesting limits to resist zip bombs. Windows may deny access to protected process memory; the app reports such scans as incomplete. A "no threats found" result applies only to the scanned scope and does not guarantee the system is safe or that every malware family was detected. Review findings before taking action and retain Microsoft Defender or another maintained endpoint protection product.

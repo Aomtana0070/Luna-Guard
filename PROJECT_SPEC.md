@@ -47,7 +47,7 @@
 
 ## 5. การวิเคราะห์ไฟล์ `analyze(path, con) -> (severity|None, [เหตุผล], sha256)`
 ลำดับ:
-1. ข้ามถ้าขนาด < 64B หรือ > 50MB
+1. ข้ามถ้าขนาด < 64B; ไฟล์ปกติสแกนได้ทุกขนาดโดย hash ทีละ 1 MiB และให้ YARA สแกนจาก path โดยไม่อ่านไฟล์ทั้งหมดเข้าหน่วยความจำ
 2. ถ้านามสกุลไม่ใช่ `SCRIPT_EXT` (`.exe .dll .scr .com .bat .cmd .ps1 .vbs .js`) ต้องขึ้นต้นด้วย `MZ` ไม่งั้นข้าม (เพื่อความเร็ว)
 3. คำนวณ SHA-256 → ตรง `hashes` ⇒ **high**
 4. อยู่ใน `allow` ⇒ ไม่แจ้ง
@@ -59,19 +59,20 @@
 การเดินไฟล์ (`walk_files`) ข้าม: `%WINDIR%`, โฟลเดอร์ Windows Defender, `LunaGuard`, และชื่อโฟลเดอร์ใน `SKIP_DIRS` (cache, gpucache, node_modules, .git, `$recycle.bin` …)
 โฟลเดอร์ค่าเริ่มต้น: `%TEMP%`, `%APPDATA%`, `%LOCALAPPDATA%`, `%PROGRAMDATA%`, `C:\Users\Public`, `Downloads`, โฟลเดอร์ Startup
 
-### การตรวจ archive
-- ตรวจ `.zip`, `.jar`, `.docx/.docm`, `.xlsx/.xlsm`, `.pptx/.pptm`, `.apk` โดยอ่านสมาชิกในหน่วยความจำ ไม่แตกไฟล์ลงดิสก์
-- ขีดจำกัดปัจจุบัน: archive หนึ่งไฟล์ไม่เกิน `MAX_FILE` (50 MiB), สูงสุด `MAX_ARCHIVE_ENTRIES` (1,000) รายการ, ข้อมูลคลายบีบอัดรวมต่อการสแกนไม่เกิน `MAX_ARCHIVE_UNPACKED` (256 MiB), และ nested archive ลึกไม่เกิน `MAX_ARCHIVE_DEPTH` (2)
-- ข้ามสมาชิกที่เข้ารหัสหรือเกินขีดจำกัดและบันทึกข้อความแจ้งใน log; ตรวจสมาชิกที่เป็นไฟล์ executable/script ตามเงื่อนไขของ `analyze_data`
+### การตรวจ archive และหน่วยความจำ
+- ตรวจ `.zip`, `.jar`, `.docx/.docm`, `.xlsx/.xlsm`, `.pptx/.pptm`, `.apk` โดยอ่าน archive จาก disk และตรวจสมาชิกโดยไม่แตกไฟล์ลงดิสก์; ไม่มีเพดานขนาด compressed archive หรือขนาดไฟล์ปกติ
+- ยังคงจำกัด archive ที่ `MAX_ARCHIVE_ENTRIES` (1,000) รายการ, ข้อมูลคลายบีบอัดรวมต่อการสแกน `MAX_ARCHIVE_UNPACKED` (256 MiB), และ nested archive ลึก `MAX_ARCHIVE_DEPTH` (2) เพื่อป้องกัน zip bomb; รายการเข้ารหัส/เกินขีดจำกัดจะทำเครื่องหมายผลสแกนว่าไม่ครบ
+- YARA ตรวจหน่วยความจำ process ทั้งหมดที่ระบบคืน PID มา ยกเว้น process ของ Luna Guard เอง; PID ที่ Windows ปฏิเสธ, timeout และข้อผิดพลาดจะถูกรายงานและทำให้ผลเป็น “สแกนไม่ครบ”
+- การตรวจพบในหน่วยความจำเป็นการแจ้งเตือนเท่านั้น ไม่สั่งปิด process อัตโนมัติของ `analyze_data`
 - finding ระบุสมาชิกและ container; สแกน+กำจัดจะไม่ย้าย archive อัตโนมัติ ผู้ใช้เลือกกักกันทั้ง archive ได้จากตารางผล
 
 ## 6. สแกน 5 ขั้น (`cmd_scan(args)`, args: `clean, full, paths, ask`)
-1. **ไฟล์** — log `▶ เริ่ม / … ตรวจแล้ว N ไฟล์ (ทุก 3 วิ) / ✔ จบ`; อัปเดต `PROGRESS`; หยุดได้ด้วย `STOP["flag"]`
-2. **โปรเซส** — `Get-CimInstance Win32_Process` (PowerShell) → exe ที่ `analyze` = high
+1. **ไฟล์** — log `▶ เริ่ม / … ตรวจแล้ว N ไฟล์ (ทุก 3 วิ) / ✔ จบ`; สแกนไฟล์รองรับทุกขนาดด้วย streaming hash และ YARA path scan; อัปเดต `PROGRESS`; หยุดได้ด้วย `STOP["flag"]`
+2. **โปรเซส/หน่วยความจำ** — `Get-CimInstance Win32_Process` (PowerShell); ตรวจ executable ที่เข้าถึงได้และรัน YARA `match(pid=...)` กับ process ทุกตัวที่ enumerate ได้ (ยกเว้นตัวแอปเอง); การปฏิเสธ/timeout ถือว่าสแกนไม่ครบ
 3. **จุดฝังตัว** — Registry Run/RunOnce (HKCU/HKLM), Scheduled Tasks (`schtasks /query /fo csv /v`); ชี้ไป high ⇒ high, ชี้ไป path เขียนได้ ⇒ medium
 4. **เครือข่าย/DNS** — `netstat -ano -p tcp` เทียบ IP C2 ⇒ high; `ipconfig /displaydns` + `hosts` เทียบโดเมน ⇒ medium
 5. **PowerShell history** (`ConsoleHost_history.txt`) — pattern IEX/DownloadString/-enc/FromBase64String/mshta http/CAPTCHA ปลอม/ปิด Defender ⇒ medium
-ผลเก็บใน `LAST_SCAN` (`time, files, clean, findings[{sev,kind,target,why}]`) + `history.json` (30 สแกนล่าสุดพร้อมจำนวน HIGH/MEDIUM/LOW และรายละเอียดสูงสุด 100 รายการต่อครั้ง; บันทึกแบบ atomic) Dashboard โหลดผลล่าสุดจากประวัติเมื่อเปิดโปรแกรมใหม่
+ผลเก็บใน `LAST_SCAN` (`time, files, clean, complete, issues, audit, findings[{sev,kind,target,why}]`) + `history.json` (30 สแกนล่าสุดพร้อมจำนวน HIGH/MEDIUM/LOW, ความครบถ้วน, audit และรายละเอียดสูงสุด 100 รายการต่อครั้ง; บันทึกแบบ atomic) หากมีไฟล์/สมาชิก archive/process เข้าถึงไม่ได้, YARA timeout/ผิดพลาด, ข้ามเพราะข้อจำกัด archive หรือหยุดสแกน UI ต้องแสดง “สแกนไม่ครบ”; หากครบและไม่พบ ให้แสดงเพียง “ไม่พบภัยคุกคามในขอบเขตที่ตรวจ” ไม่รับประกันว่าเครื่องปลอดภัยทั้งหมด
 `--clean` ทำ: `taskkill` โปรเซส → ลบค่า Registry Run → `schtasks /delete` → quarantine ไฟล์ (เฉพาะ high)
 CLI: `update | scan [--clean] [--full] [--ask] [--paths ..] | quarantine | restore <id> | add-hash <sha256> | schedule`
 
@@ -85,25 +86,25 @@ CLI: `update | scan [--clean] [--full] [--ask] [--paths ..] | quarantine | resto
 - `elevate` ใช้ `ShellExecuteW(... "runas" ...)` แล้วปิดโปรเซสเดิม
 
 ## 8. UI (`dashboard.html`)
-ธีมมืด เขียว/ฟ้า; แท็บ: แดชบอร์ด / กักกัน / Log / ตั้งค่า. องค์ประกอบ id สำคัญ: `ring` (คะแนน), `status`, `s1..s4` (การ์ดสถิติ), `chart`, `layers` (รวมสถานะ archive/Defender), `det` (ตารางตรวจพบ + ปุ่มกักกันทั้ง archive), `ask` (แบนเนอร์ไฟล์รอตัดสินใจ), `prog`/`busy`/`stopb`, `term` (log), `qt`, `selfr`; ปุ่ม Defender quick/full scan อยู่ในแดชบอร์ด
+ธีมมืด เขียว/ฟ้า; แท็บ: แดชบอร์ด / กักกัน / Log / ตั้งค่า. องค์ประกอบ id สำคัญ: `ring` (คะแนน), `status` (แยกผลไม่พบภัยในขอบเขตกับสแกนไม่ครบ), `s1..s4` (การ์ดสถิติ), `chart`, `layers` (รวมสถานะ archive/หน่วยความจำ/Defender), `det` (ตารางตรวจพบ + ปุ่มกักกันทั้ง archive), `ask` (แบนเนอร์ไฟล์รอตัดสินใจ), `prog`/`busy`/`stopb`, `term` (log), `qt`, `selfr`; ปุ่ม Defender quick/full scan อยู่ในแดชบอร์ด
 poll `/api/state` ทุก 2 วิ และ `/api/log` ทุก 1 วิ; `esc()` escape ข้อความ; path ในปุ่มใช้ `encodeURIComponent` ใน `data-p`
 คะแนน = 100 − 30×HIGH − 5×(MEDIUM+LOW)
 
-## 9. การทดสอบ (`python -m unittest -v test_luna`) — 30 ข้อ
+## 9. การทดสอบ (`python -m unittest -v test_luna`) — 33 ข้อ
 แฮชตรง · YARA XWorm · ไม่แจ้งผิดไฟล์ปกติ · ชื่อเลียนระบบ · loader=MEDIUM ไม่ถูก clean · PowerShell history · C2 connection · โดเมนหลอกลวงใน DNS · อัปเดตจาก abuse.ch (mock) · clean ครบวงจร+กู้คืน · MEDIUM→ผู้ใช้กักกัน · allowlist+กัน path ผิด · LOW · log ความคืบหน้า+ข้าม cache · ปุ่มหยุด · ประวัติ scan และ last result หลัง restart พร้อมรายละเอียด · normalize ThreatFox object + hash · retry 502 · update ล้มเหลวไม่เลื่อนเวลา · ไม่มี pywebview ก็ไม่เปิด browser หรือ server · บันทึกภาษาไทย/อังกฤษ/จีนตัวย่อและตรวจ locale keys
-เพิ่มการทดสอบ nested archive + quarantine/restore, archive unpacked-size limit, และ Defender status/scan validation; วิธี mock: ตั้ง env (`LOCALAPPDATA`, `APPDATA`, `WINDIR` …) **ก่อน import**; แทน `lg.run`, `lg.winreg` (FakeReg), `lg.http`
+เพิ่มการทดสอบ nested archive + quarantine/restore, archive unpacked-size limit, Defender status/scan validation, ไฟล์ >50 MiB, YARA memory scanning ทุก PID ที่ enumerate ได้, permission denial และการเก็บสถานะ scan-incomplete; วิธี mock: ตั้ง env (`LOCALAPPDATA`, `APPDATA`, `WINDIR` …) **ก่อน import**; แทน `lg.run`, `lg.winreg` (FakeReg), `lg.http`
 `PATH_RE` รองรับ path แบบ POSIX และ `user_writable`/`in_windows_dir` แปลง `/`→`\` เพื่อให้เทสต์บน Linux ได้
 
 ## 10. ข้อจำกัด / บั๊กที่เคยเจอ (สำคัญ)
 - **ยังไม่เคยทดสอบกับมัลแวร์ XWorm จริง** — ตัวอย่างทดสอบเป็นไฟล์จำลอง; ยังไม่ยืนยันความแม่นยำจริง
-- ส่วน Windows (netstat/schtasks/ipconfig/registry/CIM) ทดสอบผ่าน mock เท่านั้น
+- ส่วน Windows (netstat/schtasks/ipconfig/registry/CIM) ทดสอบผ่าน mock ใน unit tests; ทดสอบ YARA PID scan บน process ที่เข้าถึงได้จริงหนึ่งตัว ส่วน access denial ทดสอบด้วย mock
 - MalwareBazaar อาจตอบ 502 หรือคืน `no_results` สำหรับบาง tag; ตัวอัปเดต retry gateway/network error ชั่วคราวและแสดงสถานะต่อ query โดยไม่รายงานอัปเดตสำเร็จเมื่อทุก feed ล้มเหลว
 - ประวัติเดิมเก็บเพียงยอดรวม จึงกู้รายละเอียดรายรายการย้อนหลังไม่ได้; การสแกนหลังอัปเดตจะบันทึกรายละเอียดสูงสุด 100 รายการต่อครั้ง
 - สแกนนานมากเมื่อสแกนโฟลเดอร์ใหญ่/ทั้งไดรฟ์ (แก้บางส่วนด้วยการข้ามไฟล์ไม่ใช่โปรแกรม + cache dirs)
 - **บั๊กที่เพิ่งพบและแก้แล้ว**: dashboard ว่างเปล่าเพราะ JS syntax error (เครื่องหมาย `'` ซ้อนในสตริงปุ่ม "รันแบบ Admin"); และสถานะสแกนล่าสุดหายหลังปิดแอปเพราะเก็บไว้ในหน่วยความจำเท่านั้น
 - ThreatFox เคยใช้ query `taginfo` และวนข้อมูลโดยสมมติว่าเป็นรายการ ทำให้ API ที่ตอบ object เกิด `string indices must be integers`; เปลี่ยนเป็น `get_iocs` (7 วัน) และ normalize ข้อมูลก่อนบันทึก
 - Luna Guard ไม่ใช่ real-time protection; มีเพียงการแสดงสถานะ/ส่งคำสั่งสแกนให้ Microsoft Defender และต้องตรวจสอบการตั้งค่า Defender ใน Windows Security แยกต่างหาก
-- มีการตรวจ archive เฉพาะรูปแบบ ZIP-based ที่ระบุและอยู่ภายใต้ขีดจำกัดข้างต้น; ไม่ตรวจหน่วยความจำหรือ USB โดยตรง, ไม่ตรวจลายเซ็นดิจิทัล, และไม่รับประกันการตรวจพบทุกตระกูล
+- ตรวจหน่วยความจำ process ด้วย YARA โดยตรง; ขอบเขต/สิทธิ์ที่ Windows ปฏิเสธจะถูกทำเครื่องหมายสแกนไม่ครบ; ไม่ตรวจ USB โดยตรง, ไม่ตรวจลายเซ็นดิจิทัล, และไม่รับประกันการตรวจพบทุกตระกูล
 - Windows Defender integration, รวมถึงสิทธิ์และสถานะจริงของระบบ, ยังไม่ได้ยืนยันด้วยการสั่ง full scan จริง; การทดสอบ API ใช้ mock
 
 ## 11. Roadmap (เรียงตามความสำคัญ) + เกณฑ์ผ่าน
