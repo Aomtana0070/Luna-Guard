@@ -5,7 +5,8 @@
 :root{--bg:#070b12;--card:#0e1520;--line:#1a2535;--tx:#e6edf6;--mu:#7d8da3;--ac:#22d3a8;--ac2:#38bdf8;--hi:#f87171;--md:#fbbf24;--ok:#34d399}
 *{box-sizing:border-box}body{margin:0;background:radial-gradient(900px 400px at 15% -10%,#0f2a33 0,transparent 60%),var(--bg);color:var(--tx);font:14px/1.5 "Segoe UI",system-ui,"Noto Sans Thai",sans-serif}
 header{display:flex;align-items:center;gap:16px;padding:14px 24px;border-bottom:1px solid var(--line);position:sticky;top:0;background:#070b12cc;backdrop-filter:blur(8px);z-index:5}
-.brand-logo{width:42px;height:42px;border-radius:12px;object-fit:cover;flex:none}
+.brand-logo{width:42px;height:42px;border-radius:12px;background:linear-gradient(135deg,var(--ac),var(--ac2));flex:none;overflow:hidden}
+.brand-logo img{display:block;width:100%;height:100%;border-radius:inherit;object-fit:cover}
 h1{font-size:16px;margin:0}small,.mu{color:var(--mu)}nav{margin:0 auto;display:flex;gap:4px;background:var(--card);border:1px solid var(--line);padding:4px;border-radius:12px}
 nav button{background:none;border:0;color:var(--mu);padding:7px 16px;border-radius:9px;cursor:pointer;font:inherit}nav button.on{background:#16324040;color:var(--tx);box-shadow:inset 0 0 0 1px #22d3a844}
 .pill{padding:4px 12px;border-radius:99px;font-size:12px;border:1px solid var(--line)}.pill.run{color:var(--ac);background:#22d3a81a;border-color:#22d3a840}
@@ -27,7 +28,7 @@ input,select{background:#0a111b;border:1px solid var(--line);color:var(--tx);pad
 .bar{height:6px;background:#162231;border-radius:9px;overflow:hidden;margin-top:10px}.bar i{display:block;height:100%;width:40%;background:linear-gradient(90deg,var(--ac),var(--ac2));animation:m 1.2s infinite ease-in-out}
 @keyframes m{0%{margin-left:-40%}100%{margin-left:100%}}@media(max-width:900px){.stats,.row2,.hero,.guide-grid{grid-template-columns:1fr 1fr}.row2{grid-template-columns:1fr}}
 </style></head><body>
-<header><img class="brand-logo" src="/logo/Luna_Guard.png" alt="Luna Guard logo" width="42" height="42"><div><h1>Luna Guard</h1><small data-i18n="brand.subtitle">Threat protection workspace</small></div>
+<header><span class="brand-logo" aria-label="Luna Guard logo"><img id="brandLogo" alt="" width="42" height="42"></span><div><h1>Luna Guard</h1><small data-i18n="brand.subtitle">Threat protection workspace</small></div>
 <nav id="nav"></nav><select id="language" aria-label="App language" onchange="changeLanguage(this.value)"><option value="th">ไทย</option><option value="en">English</option><option value="zh-CN">简体中文</option></select><span class="pill" id="pill">IDLE</span></header>
 <main>
 <section class="tab on" id="t-dash">
@@ -63,6 +64,7 @@ input,select{background:#0a111b;border:1px solid var(--line);color:var(--tx);pad
 </main>
 <script>
 const T=new URLSearchParams(location.search).get('t'),$=i=>document.getElementById(i),esc=s=>String(s).replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));
+const logo=$('brandLogo');logo.src='/logo/Luna_Guard.png?t='+encodeURIComponent(T||'');logo.addEventListener('error',()=>{logo.hidden=true;console.error('Luna Guard logo could not be loaded')},{once:true});
 const api=(p,b)=>fetch('/api/'+p,{method:b?'POST':'GET',headers:{'X-T':T},body:b?JSON.stringify(b):undefined}).then(r=>r.json());
 let locale={},currentLanguage='th',currentTab='dash';
 function t(key,values={}){const text=(locale[currentLanguage]||locale.th||{})[key]||key;return text.replace(/\{(\w+)\}/g,(_,name)=>values[name]??'')}

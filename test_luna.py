@@ -281,6 +281,12 @@ class T(unittest.TestCase):
         thread = threading.Thread(target=server.serve_forever, daemon=True)
         thread.start()
         try:
+            page_url = f"http://127.0.0.1:{server.server_address[1]}/?t={dashboard.TOKEN}"
+            with urlopen(page_url, timeout=5) as response:
+                page = response.read().decode("utf-8")
+            self.assertIn('id="brandLogo"', page)
+            self.assertIn("logo.src='/logo/Luna_Guard.png?t='+encodeURIComponent(T||'')", page)
+            self.assertNotIn('src="/logo/Luna_Guard.png"', page)
             url = f"http://127.0.0.1:{server.server_address[1]}/logo/Luna_Guard.png?t={dashboard.TOKEN}"
             with urlopen(url, timeout=5) as response:
                 self.assertEqual(response.headers.get_content_type(), "image/png")
