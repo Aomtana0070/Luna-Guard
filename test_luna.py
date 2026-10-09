@@ -1,6 +1,6 @@
-"""29 test cases ของ Luna Guard  (รัน: python -m unittest -v test_luna)
+"""30 test cases ของ Luna Guard  (รัน: python -m unittest -v test_luna)
 ส่วนที่เป็นคำสั่ง Windows (netstat/schtasks/ipconfig/registry) จำลองผลลัพธ์ด้วย mock - ไฟล์/แฮช/YARA/กักกัน/ฐานข้อมูลทดสอบจริง"""
-import argparse, contextlib, hashlib, io, json, os, sys, tempfile, threading, unittest, zipfile
+import argparse, contextlib, hashlib, io, json, os, struct, sys, tempfile, threading, unittest, zipfile
 from pathlib import Path
 from unittest import mock
 from urllib.request import urlopen
@@ -351,6 +351,22 @@ class T(unittest.TestCase):
         finding = next(item for item in result["findings"] if item["kind"] == "Archive member")
         self.assertEqual(finding["sev"], "high")
         self.assertEqual(finding["container"], str(office_path))
+
+    def test30_luna_logo_is_embedded_as_the_executable_icon(self):
+        root = Path(__file__).resolve().parent
+        icon = (root / "logo" / "Luna_Guard.ico").read_bytes()
+        reserved, image_type, count = struct.unpack_from("<HHH", icon)
+        self.assertEqual((reserved, image_type, count), (0, 1, 6))
+        sizes = []
+        for index in range(count):
+            width, height, _, _, planes, bits, length, offset = struct.unpack_from("<BBBBHHII", icon, 6 + index * 16)
+            sizes.append((width or 256, height or 256))
+            self.assertEqual((planes, bits), (1, 32))
+            self.assertEqual(icon[offset:offset + 8], b"\x89PNG\r\n\x1a\n")
+            self.assertLessEqual(offset + length, len(icon))
+        self.assertEqual(sizes, [(256, 256), (128, 128), (64, 64), (48, 48), (32, 32), (16, 16)])
+        self.assertIn('--icon "logo\\Luna_Guard.ico"', (root / "build.bat").read_text(encoding="utf-8"))
+        self.assertIn('--icon "logo/Luna_Guard.ico"', (root / ".github" / "workflows" / "windows.yml").read_text(encoding="utf-8"))
 
 
 if __name__ == "__main__":

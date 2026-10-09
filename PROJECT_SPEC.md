@@ -23,6 +23,7 @@
 | `dashboard.html` | UI ไฟล์เดียว (HTML/CSS/JS ล้วน ไม่มี CDN) เรียก API ด้วย polling |
 | `locales.json` | ข้อความ UI และคู่มือภาษาไทย อังกฤษ และจีนตัวย่อ (รวมใน EXE) |
 | `logo\Luna_Guard.png` | โลโก้แอป แสดงในหน้าต่างและรวมใน EXE |
+| `logo\Luna_Guard.ico` | ไอคอนหลายขนาดที่สร้างจากโลโก้ ใช้เป็นไอคอน EXE/taskbar ใน build ทุกช่องทาง |
 | `luna_app.py` | แอปเดสก์ท็อป: เปิด server ในเครื่องแล้วแสดง UI ในหน้าต่าง **pywebview**; ถ้าไม่มี dependency แจ้ง error และไม่เปิด browser |
 | `luna_rules.yar` | กฎ YARA (severity: high/medium/low ใน `meta`) |
 | `build.bat` | PyInstaller → `dist\LunaGuard.exe` (`--uac-admin`, bundle html+locales+logo+yar) |
@@ -88,7 +89,7 @@ CLI: `update | scan [--clean] [--full] [--ask] [--paths ..] | quarantine | resto
 poll `/api/state` ทุก 2 วิ และ `/api/log` ทุก 1 วิ; `esc()` escape ข้อความ; path ในปุ่มใช้ `encodeURIComponent` ใน `data-p`
 คะแนน = 100 − 30×HIGH − 5×(MEDIUM+LOW)
 
-## 9. การทดสอบ (`python -m unittest -v test_luna`) — 29 ข้อ
+## 9. การทดสอบ (`python -m unittest -v test_luna`) — 30 ข้อ
 แฮชตรง · YARA XWorm · ไม่แจ้งผิดไฟล์ปกติ · ชื่อเลียนระบบ · loader=MEDIUM ไม่ถูก clean · PowerShell history · C2 connection · โดเมนหลอกลวงใน DNS · อัปเดตจาก abuse.ch (mock) · clean ครบวงจร+กู้คืน · MEDIUM→ผู้ใช้กักกัน · allowlist+กัน path ผิด · LOW · log ความคืบหน้า+ข้าม cache · ปุ่มหยุด · ประวัติ scan และ last result หลัง restart พร้อมรายละเอียด · normalize ThreatFox object + hash · retry 502 · update ล้มเหลวไม่เลื่อนเวลา · ไม่มี pywebview ก็ไม่เปิด browser หรือ server · บันทึกภาษาไทย/อังกฤษ/จีนตัวย่อและตรวจ locale keys
 เพิ่มการทดสอบ nested archive + quarantine/restore, archive unpacked-size limit, และ Defender status/scan validation; วิธี mock: ตั้ง env (`LOCALAPPDATA`, `APPDATA`, `WINDIR` …) **ก่อน import**; แทน `lg.run`, `lg.winreg` (FakeReg), `lg.http`
 `PATH_RE` รองรับ path แบบ POSIX และ `user_writable`/`in_windows_dir` แปลง `/`→`\` เพื่อให้เทสต์บน Linux ได้
