@@ -135,7 +135,9 @@ class T(unittest.TestCase):
         self.assertFalse(f.exists()); self.assertEqual(FakeReg.data[RUNKEY], {})
         self.assertIn(["taskkill", "/F", "/PID", "4321"], CMDS); self.assertTrue(any(c[:2] == ["schtasks", "/delete"] for c in CMDS))
         qid = next(iter(lg.load_index())); _, r2 = scan(); self.assertEqual([x for x in r2["findings"] if x["sev"] == "high"], [])
-        lg.cmd_restore(argparse.Namespace(id=qid)); self.assertTrue(f.exists())
+        with contextlib.redirect_stdout(io.StringIO()):
+            lg.cmd_restore(argparse.Namespace(id=qid))
+        self.assertTrue(f.exists())
 
     def test11_medium_asks_user_then_quarantine(self):
         f = TMP / "l.ps1"; f.write_bytes(b'x.DownloadString("http://a");[Convert]::FromBase64String($a);-WindowStyle Hidden')
@@ -178,7 +180,7 @@ class T(unittest.TestCase):
         _, result = scan()
         saved = json.loads(lg.HISTORY.read_text())[-1]
         self.assertEqual(saved["time"], result["time"])
-        self.assertEqual(saved["findings"][0]["target"], str(f))
+        self.assertTrue(os.path.samefile(saved["findings"][0]["target"], str(f)))
         self.assertEqual(saved["medium"], 1)
         lg.LAST_SCAN.clear()
         self.assertEqual(dashboard.state()["last"]["time"], saved["time"])
