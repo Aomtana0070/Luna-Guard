@@ -293,8 +293,9 @@ class _LunaGuardMobileAppState extends State<LunaGuardMobileApp> {
       );
       if (file == null) return;
       final imported = <String>{};
-      await for (final line
-          in file.readAsByteStream().transform(utf8.decoder).transform(const LineSplitter())) {
+      final lines = const LineSplitter()
+          .bind(utf8.decoder.bind(file.readAsByteStream()));
+      await for (final line in lines) {
         imported.addAll(parseSha256List(line));
         if (imported.length > 5000) {
           _message(tr('hashLimit'));

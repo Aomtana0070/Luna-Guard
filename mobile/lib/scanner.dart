@@ -44,6 +44,19 @@ class FileScanResult {
       );
 }
 
+class _DigestSink implements Sink<Digest> {
+  Digest? _digest;
+
+  @override
+  void add(Digest value) => _digest = value;
+
+  @override
+  void close() {}
+
+  Digest get digest =>
+      _digest ?? (throw StateError('SHA-256 stream produced no digest'));
+}
+
 class FileScanner {
   static const _scriptExtensions = {
     '.exe',
@@ -79,7 +92,7 @@ class FileScanner {
     required Stream<List<int>> content,
     Set<String> knownHashes = const {},
   }) async {
-    final digestSink = AccumulatorSink<Digest>();
+    final digestSink = _DigestSink();
     final hashInput = sha256.startChunkedConversion(digestSink);
     final extension = _extension(name);
     final isScript = _scriptExtensions.contains(extension);
@@ -132,7 +145,7 @@ class FileScanner {
           : combined.sublist(combined.length - carryLimit);
     }
     hashInput.close();
-    final hash = digestSink.events.single.toString();
+    final hash = digestSink.digest.toString();
     final reasons = <String>[];
     var level = FindingLevel.clean;
     var complete = true;
@@ -212,7 +225,6 @@ class FileScanner {
 
   static List<int> _toWideAscii(List<int> bytes) =>
       bytes.expand((byte) => [byte, 0]).toList(growable: false);
-
 }
 
 Set<String> parseSha256List(String contents) {
