@@ -33,6 +33,7 @@ import time
 import urllib.parse
 import urllib.error
 import urllib.request
+import zipfile
 from pathlib import Path
 
 try:
@@ -46,6 +47,10 @@ DB_PATH = APP_DIR / "threats.db"
 QUAR_DIR = APP_DIR / "quarantine"
 QUAR_INDEX = QUAR_DIR / "index.json"
 MAX_FILE = 50 * 1024 * 1024
+MAX_ARCHIVE_ENTRIES = 1000
+MAX_ARCHIVE_UNPACKED = 256 * 1024 * 1024
+ARCHIVE_EXT = {".zip", ".jar", ".docx", ".docm", ".xlsx", ".xlsm", ".pptx", ".pptm", ".apk"}
+MAX_ARCHIVE_DEPTH = 2
 TAGS = ["XWorm", "MrBeast"]  # แท็กที่ดึงจาก MalwareBazaar / ThreatFox
 
 # โดเมนหลอกลวงที่รู้จัก (เพิ่มเองได้ด้วยการแก้ลิสต์นี้)
@@ -338,19 +343,9 @@ def in_windows_dir(p):
     return p.lower().replace("/", "\\").startswith(win.replace("/", "\\") + "\\")
 
 
-def analyze(path, con):
-    """คืน (severity, [เหตุผล], sha256) ; severity = 'high' | 'medium' | None"""
-    try:
-        size = os.path.getsize(path)
-        if size > MAX_FILE or size < 64:
-            return None, [], ""
-        if Path(path).suffix.lower() not in SCRIPT_EXT:  # ข้ามไฟล์ที่ไม่ใช่โปรแกรม (เร็วขึ้นมาก)
-            with open(path, "rb") as fh:
-                if fh.read(2) != b"MZ":
-                    return None, [], ""
-        sha = sha256_of(path)
-    except OSError:
-        return None, [], ""
+def analyze_data(path, data, con):
+    """Analyze bounded file bytes against hash, allowlist, YARA, and local heuristics."""
+    sha = hashlib.sha256(data).hexdigest()
     row = con.execute("SELECT family FROM hashes WHERE sha256=?", (sha,)).fetchone()
     if row:
         return "high", [f"แฮชตรงกับมัลแวร์ที่รู้จัก ({row[0]})"], sha
@@ -358,11 +353,6 @@ def analyze(path, con):
         return None, [], sha
     ext = Path(path).suffix.lower()
     if ext not in SCRIPT_EXT:
-        return None, [], sha
-    try:
-        with open(path, "rb") as f:
-            data = f.read()
-    except OSError:
         return None, [], sha
     ym = yara_scan(data)
     ywhy = [f"YARA: {m['rule']}" for m in ym]
@@ -394,6 +384,124 @@ def analyze(path, con):
     if ysev == "low":
         return "low", ywhy + why, sha
     return None, [], sha
+
+
+def analyze(path, con):
+    """คืน (severity, [เหตุผล], sha256) ; severity = 'high' | 'medium' | None"""
+    try:
+        size = os.path.getsize(path)
+        if size > MAX_FILE or size < 64:
+            return None, [], ""
+        with open(path, "rb") as fh:
+            data = fh.read(MAX_FILE + 1)
+        if len(data) > MAX_FILE:
+            return None, [], ""
+        if Path(path).suffix.lower() not in SCRIPT_EXT and data[:2] != b"MZ":
+            return None, [], ""
+    except OSError:
+        return None, [], ""
+    return analyze_data(path, data, con)
+
+
+def scan_archive(path, con, budget=None, depth=0):
+    """Inspect ZIP-based archives without extracting; enforce shared per-scan limits."""
+    budget = budget if budget is not None else {"entries": 0, "bytes": 0}
+    findings = []
+    try:
+        if os.path.getsize(path) > MAX_FILE:
+            print(f"[!] ข้าม archive ที่ใหญ่เกินขีดจำกัด {path}")
+            return findings
+        archive_data = Path(path).read_bytes()
+    except OSError as e:
+        print(f"[!] อ่าน archive ไม่สำเร็จ {path}: {e}")
+        return findings
+
+    try:
+        archive = zipfile.ZipFile(io.BytesIO(archive_data))
+    except (OSError, zipfile.BadZipFile):
+        return findings
+
+    with archive:
+        for info in archive.infolist():
+            if info.is_dir():
+                continue
+            if budget["entries"] >= MAX_ARCHIVE_ENTRIES:
+                print(f"[!] ถึงขีดจำกัดจำนวนรายการใน archive แล้ว ({MAX_ARCHIVE_ENTRIES})")
+                break
+            budget["entries"] += 1
+            if info.flag_bits & 0x1:
+                print(f"[!] ข้ามไฟล์ใน archive ที่เข้ารหัสไว้: {path}!{info.filename}")
+                continue
+            if info.file_size > MAX_FILE or budget["bytes"] + info.file_size > MAX_ARCHIVE_UNPACKED:
+                print(f"[!] ข้ามไฟล์ใน archive ที่เกินขีดจำกัด: {path}!{info.filename}")
+                continue
+            try:
+                with archive.open(info) as member:
+                    data = member.read(min(MAX_FILE, MAX_ARCHIVE_UNPACKED - budget["bytes"]) + 1)
+            except (OSError, RuntimeError, zipfile.BadZipFile, EOFError) as e:
+                print(f"[!] อ่านไฟล์ใน archive ไม่สำเร็จ {path}!{info.filename}: {e}")
+                continue
+            if len(data) > MAX_FILE or budget["bytes"] + len(data) > MAX_ARCHIVE_UNPACKED:
+                print(f"[!] ข้ามไฟล์ใน archive ที่เกินขีดจำกัด: {path}!{info.filename}")
+                continue
+            budget["bytes"] += len(data)
+            target = f"{path}!{info.filename}"
+            if len(data) >= 64 and (Path(info.filename).suffix.lower() in SCRIPT_EXT or data[:2] == b"MZ"):
+                severity, reasons, _ = analyze_data(info.filename, data, con)
+                if severity:
+                    findings.append({
+                        "sev": severity, "kind": "Archive member", "target": target,
+                        "why": "; ".join(reasons), "container": str(path),
+                    })
+            if (depth + 1 < MAX_ARCHIVE_DEPTH and len(data) >= 4
+                    and Path(info.filename).suffix.lower() in ARCHIVE_EXT):
+                findings.extend(scan_archive_bytes(data, target, con, budget, depth + 1))
+    return findings
+
+
+def scan_archive_bytes(data, label, con, budget, depth):
+    """Inspect a nested ZIP already bounded by its parent archive."""
+    findings = []
+    try:
+        archive = zipfile.ZipFile(io.BytesIO(data))
+    except (OSError, zipfile.BadZipFile):
+        return findings
+    with archive:
+        for info in archive.infolist():
+            if info.is_dir():
+                continue
+            if budget["entries"] >= MAX_ARCHIVE_ENTRIES:
+                print(f"[!] ถึงขีดจำกัดจำนวนรายการใน archive แล้ว ({MAX_ARCHIVE_ENTRIES})")
+                break
+            budget["entries"] += 1
+            if info.flag_bits & 0x1:
+                print(f"[!] ข้ามไฟล์ใน archive ที่เข้ารหัสไว้: {label}!{info.filename}")
+                continue
+            if info.file_size > MAX_FILE or budget["bytes"] + info.file_size > MAX_ARCHIVE_UNPACKED:
+                print(f"[!] ข้ามไฟล์ใน archive ที่เกินขีดจำกัด: {label}!{info.filename}")
+                continue
+            try:
+                with archive.open(info) as member:
+                    contents = member.read(min(MAX_FILE, MAX_ARCHIVE_UNPACKED - budget["bytes"]) + 1)
+            except (OSError, RuntimeError, zipfile.BadZipFile, EOFError) as e:
+                print(f"[!] อ่านไฟล์ใน archive ไม่สำเร็จ {label}!{info.filename}: {e}")
+                continue
+            if len(contents) > MAX_FILE or budget["bytes"] + len(contents) > MAX_ARCHIVE_UNPACKED:
+                print(f"[!] ข้ามไฟล์ใน archive ที่เกินขีดจำกัด: {label}!{info.filename}")
+                continue
+            budget["bytes"] += len(contents)
+            target = f"{label}!{info.filename}"
+            if len(contents) >= 64 and (Path(info.filename).suffix.lower() in SCRIPT_EXT or contents[:2] == b"MZ"):
+                severity, reasons, _ = analyze_data(info.filename, contents, con)
+                if severity:
+                    findings.append({
+                        "sev": severity, "kind": "Archive member", "target": target,
+                        "why": "; ".join(reasons), "container": label.split("!")[0],
+                    })
+            if (depth + 1 < MAX_ARCHIVE_DEPTH and len(contents) >= 4
+                    and Path(info.filename).suffix.lower() in ARCHIVE_EXT):
+                findings.extend(scan_archive_bytes(contents, target, con, budget, depth + 1))
+    return findings
 
 
 # ---------------------------------------------------------------- ตัวเก็บข้อมูลระบบ
@@ -559,7 +667,8 @@ def cmd_scan(args):
     print(f"ฐานข้อมูลอัปเดตล่าสุด: {last[0] if last else 'ยังไม่เคยอัปเดต (รัน update ก่อน)'}")
     print("YARA:", "เปิดใช้งาน" if yara_rules() else "ไม่ได้ใช้ (pip install yara-python เพื่อเปิด)")
     roots = [r"C:\\"] if args.full else (args.paths or default_scan_dirs())
-    high_files, findings = {}, []
+    high_files, findings, archive_findings = {}, [], []
+    archive_budget = {"entries": 0, "bytes": 0}
 
     print(f"[1/5] สแกนไฟล์ ({len(roots)} โฟลเดอร์)...")
     count, t0, STOP["flag"] = 0, time.time(), False
@@ -580,6 +689,8 @@ def cmd_scan(args):
                 findings.append((sev, "ไฟล์", f, why))
                 if sev == "high":
                     high_files[f] = (sha, why)
+            if Path(f).suffix.lower() in ARCHIVE_EXT:
+                archive_findings.extend(scan_archive(f, con, archive_budget))
         print(f"      ✔ จบ: {root} — {rc:,} ไฟล์ ใช้ {int(time.time() - rt)} วิ")
         if STOP["flag"]:
             print("[!] ผู้ใช้สั่งหยุดสแกนไฟล์ - ข้ามไปตรวจขั้นตอนที่เหลือ")
@@ -628,9 +739,14 @@ def cmd_scan(args):
         findings.append(("medium", "PowerShell", f"บรรทัด {n}: {line}", [desc]))
 
     PROGRESS.clear()
+    saved_findings = [
+        {"sev": a, "kind": b, "target": c, "why": "; ".join(d)}
+        for a, b, c, d in findings
+    ] + archive_findings
     LAST_SCAN.clear()
     LAST_SCAN.update(time=dt.datetime.now().isoformat(timespec="seconds"), files=count, clean=bool(args.clean),
-                     findings=[{"sev": a, "kind": b, "target": c, "why": "; ".join(d)} for a, b, c, d in findings])
+                     findings=saved_findings)
+    totals = {level: sum(f["sev"] == level for f in saved_findings) for level in ("high", "medium", "low")}
     hist = []
     history_ok = True
     if HISTORY.exists():
@@ -642,7 +758,6 @@ def cmd_scan(args):
             history_ok = False
             print(f"[!] อ่านประวัติการสแกนไม่สำเร็จ จึงไม่เขียนทับไฟล์เดิม: {e}")
     if history_ok:
-        totals = {level: sum(f[0] == level for f in findings) for level in ("high", "medium", "low")}
         hist.append({
             "time": LAST_SCAN["time"], "files": count, "clean": bool(args.clean),
             **totals, "findings_total": len(LAST_SCAN["findings"]),
@@ -654,20 +769,25 @@ def cmd_scan(args):
             temp_history.replace(HISTORY)
         except OSError as e:
             print(f"[!] บันทึกประวัติการสแกนไม่สำเร็จ: {e}")
-    print(f"[+] สรุป: ตรวจ {count} ไฟล์ | HIGH {sum(f[0]=='high' for f in findings)} "
-          f"| MEDIUM {sum(f[0]=='medium' for f in findings)} | LOW {sum(f[0]=='low' for f in findings)}")
+    print(f"[+] สรุป: ตรวจ {count} ไฟล์ | HIGH {totals['high']} "
+          f"| MEDIUM {totals['medium']} | LOW {totals['low']}")
     # ---- รายงาน
     print("\n" + "=" * 60)
-    if not findings:
+    if not findings and not archive_findings:
         print("ไม่พบสิ่งผิดปกติ (แต่ไม่ได้การันตีว่าสะอาด 100%)")
     for sev, kind, target, why in sorted(findings, key=lambda x: x[0] != "high"):
         print(f"[{sev.upper():6}] {kind}: {target}\n         เหตุผล: {'; '.join(why)}")
+    for finding in sorted(archive_findings, key=lambda x: x["sev"] != "high"):
+        print(f"[{finding['sev'].upper():6}] {finding['kind']}: {finding['target']}\n"
+              f"         เหตุผล: {finding['why']} (กักกันทั้ง archive ได้จากตารางผลสแกน)")
 
     if not args.clean:
         if high_files or bad_pids or bad_reg or bad_tasks:
             print("\nพบรายการ HIGH - รันซ้ำพร้อม --clean เพื่อกำจัด (กักกันไฟล์ ไม่ลบทิ้งทันที)")
     else:
         print("\n--- กำจัด ---")
+        if archive_findings:
+            print("[!] ผลตรวจพบภายใน archive จะแจ้งเตือนเท่านั้น; กักกันทั้ง archive ได้จากตารางผลสแกน")
         for pid, exe in bad_pids.items():
             run(["taskkill", "/F", "/PID", str(pid)])
             print(f"kill PID {pid}")
@@ -702,7 +822,9 @@ def _find(path):
 
 def remove_finding(path):
     """ผู้ใช้เลือกกักกันเอง - ทำได้เฉพาะไฟล์ที่อยู่ในผลสแกนล่าสุดเท่านั้น (กันถูกใช้ลบไฟล์มั่ว)"""
-    f = _find(path)
+    f = next((item for item in LAST_SCAN.get("findings", [])
+              if (item.get("kind") == "ไฟล์" and item.get("target") == path)
+              or (item.get("kind") == "Archive member" and item.get("container") == path)), None)
     if not f:
         raise SystemExit("ไม่พบรายการนี้ในผลสแกนล่าสุด")
     sha = sha256_of(path)

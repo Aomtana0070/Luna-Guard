@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Luna Guard Dashboard - เซิร์ฟเวอร์ภายในเครื่อง (127.0.0.1) + หน้า dashboard.html  รัน: python luna_dashboard.py"""
-import argparse, contextlib, ctypes, json, re, secrets, shutil, sys, tempfile, threading, time, webbrowser
+import argparse, contextlib, ctypes, json, re, secrets, shutil, subprocess, sys, tempfile, threading, time, webbrowser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 import luna_guard as lg
@@ -10,6 +10,7 @@ S = {"job": None, "log": [], "self": None, "history_error": None}
 TOKEN = secrets.token_urlsafe(16)
 LANGUAGES = {"th", "en", "zh-CN"}
 LANGUAGE_FILE = lg.APP_DIR / "settings.json"
+DEFENDER_STATUS = {"checked": 0.0, "value": {"available": False}}
 
 
 def get_language():
@@ -104,6 +105,57 @@ def is_admin():
     except Exception: return False
 
 
+def defender_status(force=False):
+    if not lg.IS_WIN:
+        return {"available": False, "error": "Windows Defender status is only available on Windows."}
+    if not force and time.monotonic() - DEFENDER_STATUS["checked"] < 30:
+        return dict(DEFENDER_STATUS["value"])
+
+    command = (
+        "$ErrorActionPreference='Stop'; "
+        "try { $s=Get-MpComputerStatus; "
+        "[pscustomobject]@{available=$true; antivirus=[bool]$s.AntivirusEnabled; "
+        "realtime=[bool]$s.RealTimeProtectionEnabled; behavior=[bool]$s.BehaviorMonitorEnabled} "
+        "| ConvertTo-Json -Compress } "
+        "catch { [pscustomobject]@{available=$false; error=$_.Exception.Message} "
+        "| ConvertTo-Json -Compress; exit 1 }"
+    )
+    try:
+        result = subprocess.run(
+            ["powershell", "-NoProfile", "-NonInteractive", "-Command", command],
+            capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=8,
+            stdin=subprocess.DEVNULL, creationflags=0x08000000 if lg.IS_WIN else 0,
+        )
+        parsed = json.loads(result.stdout)
+        if not isinstance(parsed, dict):
+            raise ValueError("Unexpected Windows Defender status response.")
+        value = parsed
+    except (OSError, subprocess.SubprocessError, ValueError) as e:
+        value = {"available": False, "error": str(e)}
+    DEFENDER_STATUS.update(checked=time.monotonic(), value=value)
+    if not value.get("available"):
+        log(f"[!] ตรวจสอบสถานะ Microsoft Defender ไม่สำเร็จ: {value.get('error', 'ไม่พบสถานะ')}")
+    return dict(value)
+
+
+def start_defender_scan(scan_type):
+    scan_types = {"quick": "QuickScan", "full": "FullScan"}
+    if scan_type not in scan_types:
+        raise ValueError("Unsupported Microsoft Defender scan type.")
+    if not lg.IS_WIN:
+        raise OSError("Microsoft Defender scans are only available on Windows.")
+    command = f"Start-MpScan -ScanType {scan_types[scan_type]} -ErrorAction Stop"
+    result = subprocess.run(
+        ["powershell", "-NoProfile", "-NonInteractive", "-Command", command],
+        capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=60,
+        stdin=subprocess.DEVNULL, creationflags=0x08000000,
+    )
+    if result.returncode:
+        detail = (result.stderr or result.stdout).strip()
+        raise OSError(detail or "Microsoft Defender did not accept the scan request.")
+    log(f"[+] ส่งคำสั่ง Microsoft Defender {scan_type} scan แล้ว; ดูผลได้ใน Windows Security")
+
+
 def state():
     con = lg.db(); g = lambda k: (con.execute("SELECT v FROM meta WHERE k=?", (k,)).fetchone() or [None])[0]
     try:
@@ -121,6 +173,7 @@ def state():
     last = lg.LAST_SCAN or (hist[-1] if hist else {})
     r = {"hashes": con.execute("SELECT COUNT(*) FROM hashes").fetchone()[0], "iocs": con.execute("SELECT COUNT(*) FROM iocs").fetchone()[0],
          "updated": g("last_update"), "key": bool(lg.get_key()), "yara": bool(lg.yara_rules()), "admin": is_admin(), "job": S["job"],
+         "defender": defender_status(),
          "hist": hist[-20:], "last": last, "quar": [{"id": k, **v} for k, v in lg.load_index().items()], "self": S["self"], "prog": dict(lg.PROGRESS), "n": len(S["log"]), "language": get_language()}
     con.close(); return r
 
@@ -152,6 +205,14 @@ class H(BaseHTTPRequestHandler):
             a = type("A", (), {"clean": bool(d.get("clean")), "full": bool(d.get("full")), "paths": d.get("paths") or None})()
             ok = start("สแกน+กำจัด" if a.clean else "สแกน", lambda: lg.cmd_scan(a))
         elif p == "/api/selftest": ok = start("ทดสอบตัวเอง", selftest)
+        elif p == "/api/defender-scan":
+            scan_type = d.get("scan_type")
+            if scan_type not in ("quick", "full"):
+                return s.out(400, {"ok": False, "error": "unsupported scan type"})
+            ok = start(
+                f"Microsoft Defender {scan_type} scan",
+                lambda: start_defender_scan(scan_type),
+            )
         elif p == "/api/restore":
             try:
                 with contextlib.redirect_stdout(W()): lg.cmd_restore(type("A", (), {"id": d.get("id", "")})())

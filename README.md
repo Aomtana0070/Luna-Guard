@@ -7,9 +7,11 @@ Luna Guard is a Windows desktop helper for scanning and quarantining suspicious 
 - Desktop window powered by pywebview; the local API binds only to `127.0.0.1` and checks a per-run token and Host header.
 - Luna Guard logo is shown in the app and bundled with the Windows executable.
 - Scan findings with severity and reasons, plus up to 100 detailed findings per scan in local history.
+- Bounded inspection of supported ZIP-based archives, including macro-enabled Office documents and APKs; a flagged member can quarantine its containing archive.
 - Reversible quarantine; HIGH findings are the only findings handled automatically by remediation. Review MEDIUM and LOW findings yourself.
+- Microsoft Defender status reporting and buttons to request Defender quick or full scans on Windows.
 - Optional YARA scanning with the bundled Luna Guard rules and `yara-python`.
-- Thai, English, and Simplified Chinese interface and in-app guide.
+- Thai, English, and Simplified Chinese interface and in-app guide covering archive inspection and Microsoft Defender.
 - Threat-data updates from MalwareBazaar, ThreatFox, and URLhaus (abuse.ch). Feed availability and API limits are controlled by their providers.
 
 ## Run from source
@@ -38,4 +40,4 @@ The executable is not signed. Windows SmartScreen may show an unfamiliar-app war
 
 Threat hashes and indicators are downloaded from [MalwareBazaar](https://bazaar.abuse.ch/), [ThreatFox](https://threatfox.abuse.ch/), and [URLhaus](https://urlhaus.abuse.ch/). YARA rules shipped with the app are maintained in this repository. Update requests contact those services; the app does not upload scanned files or scan history. An abuse.ch Auth-Key, if configured, is stored locally under `%LOCALAPPDATA%\LunaGuard`.
 
-Downloaded threat intelligence and detection rules can change over time. Neither a clean scan nor a successful update guarantees that a system is safe or that all malware will be detected. Review findings before taking action and retain Microsoft Defender or another maintained endpoint protection product.
+Luna Guard scans on demand; Microsoft Defender provides real-time protection when enabled. Archive inspection has size, entry-count, and nesting limits, and Luna Guard does not directly inspect memory or guarantee detection of every malware family. Downloaded threat intelligence and detection rules can change over time. Neither a clean scan nor a successful update guarantees that a system is safe. Review findings before taking action and retain Microsoft Defender or another maintained endpoint protection product.

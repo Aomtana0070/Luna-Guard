@@ -26,7 +26,7 @@
 | `luna_app.py` | แอปเดสก์ท็อป: เปิด server ในเครื่องแล้วแสดง UI ในหน้าต่าง **pywebview**; ถ้าไม่มี dependency แจ้ง error และไม่เปิด browser |
 | `luna_rules.yar` | กฎ YARA (severity: high/medium/low ใน `meta`) |
 | `build.bat` | PyInstaller → `dist\LunaGuard.exe` (`--uac-admin`, bundle html+locales+logo+yar) |
-| `test_luna.py` | unittest (mock คำสั่ง Windows) |
+| `test_luna.py` | unittest (mock คำสั่ง Windows; ครอบคลุม archive และ Defender) |
 | `luna_gui.py` | **เลิกใช้** (tkinter รุ่นแรก) ลบได้ |
 
 ข้อมูลผู้ใช้อยู่ที่ `%LOCALAPPDATA%\LunaGuard\`: `threats.db` (SQLite), `quarantine\*.quar` + `index.json`, `config.json` (คีย์ abuse.ch), `history.json` (30 สแกนล่าสุด), `rules\*.yar` (กฎที่ผู้ใช้เพิ่มเอง)
@@ -58,6 +58,12 @@
 การเดินไฟล์ (`walk_files`) ข้าม: `%WINDIR%`, โฟลเดอร์ Windows Defender, `LunaGuard`, และชื่อโฟลเดอร์ใน `SKIP_DIRS` (cache, gpucache, node_modules, .git, `$recycle.bin` …)
 โฟลเดอร์ค่าเริ่มต้น: `%TEMP%`, `%APPDATA%`, `%LOCALAPPDATA%`, `%PROGRAMDATA%`, `C:\Users\Public`, `Downloads`, โฟลเดอร์ Startup
 
+### การตรวจ archive
+- ตรวจ `.zip`, `.jar`, `.docx/.docm`, `.xlsx/.xlsm`, `.pptx/.pptm`, `.apk` โดยอ่านสมาชิกในหน่วยความจำ ไม่แตกไฟล์ลงดิสก์
+- ขีดจำกัดปัจจุบัน: archive หนึ่งไฟล์ไม่เกิน `MAX_FILE` (50 MiB), สูงสุด `MAX_ARCHIVE_ENTRIES` (1,000) รายการ, ข้อมูลคลายบีบอัดรวมต่อการสแกนไม่เกิน `MAX_ARCHIVE_UNPACKED` (256 MiB), และ nested archive ลึกไม่เกิน `MAX_ARCHIVE_DEPTH` (2)
+- ข้ามสมาชิกที่เข้ารหัสหรือเกินขีดจำกัดและบันทึกข้อความแจ้งใน log; ตรวจสมาชิกที่เป็นไฟล์ executable/script ตามเงื่อนไขของ `analyze_data`
+- finding ระบุสมาชิกและ container; สแกน+กำจัดจะไม่ย้าย archive อัตโนมัติ ผู้ใช้เลือกกักกันทั้ง archive ได้จากตารางผล
+
 ## 6. สแกน 5 ขั้น (`cmd_scan(args)`, args: `clean, full, paths, ask`)
 1. **ไฟล์** — log `▶ เริ่ม / … ตรวจแล้ว N ไฟล์ (ทุก 3 วิ) / ✔ จบ`; อัปเดต `PROGRESS`; หยุดได้ด้วย `STOP["flag"]`
 2. **โปรเซส** — `Get-CimInstance Win32_Process` (PowerShell) → exe ที่ `analyze` = high
@@ -71,19 +77,20 @@ CLI: `update | scan [--clean] [--full] [--ask] [--paths ..] | quarantine | resto
 ## 7. REST API (`luna_dashboard.py`)
 ทุก request ต้องมี token (`?t=` หรือ header `X-T`) และ `Host` เป็น `127.0.0.1`/`localhost` ไม่งั้น 403
 - `GET /` → dashboard.html; `GET /api/state`; `GET /api/log?since=N`
-- `POST /api/update | /api/scan {clean,full,paths} | /api/selftest | /api/restore {id} | /api/key {key} | /api/remove {path} | /api/allow {path} | /api/stop | /api/elevate`
+- `POST /api/update | /api/scan {clean,full,paths} | /api/defender-scan {scan_type: quick|full} | /api/selftest | /api/restore {id} | /api/key {key} | /api/remove {path} | /api/allow {path} | /api/stop | /api/elevate`
 - งานยาวรันเป็น thread เดียว (`S["job"]`); ซ้อนงานได้ 409; stdout ของงานถูกจับเข้า `S["log"]` (ระดับสีจากคำนำหน้า `[HIGH`, `[MEDIUM`, `[+]`, `[!]`, `[PASS`, `[FAIL`)
-- `/api/state`: `hashes, iocs, updated, key, yara, admin, job, hist, last, quar, self, prog, n`; ตารางประวัติแสดงเวลา/โหมด/จำนวนไฟล์/ระดับความเสี่ยง และเปิดดูรายละเอียดรายการที่ตรวจพบได้
+- `/api/state`: `hashes, iocs, updated, key, yara, admin, defender, job, hist, last, quar, self, prog, n`; Defender status มาจาก `Get-MpComputerStatus` และ cache 30 วินาที; scan request ใช้ `Start-MpScan` บน Windows
+- งาน Defender ถูกส่งผ่าน job runner; Luna Guard แสดงสถานะที่ Windows รายงานและไม่ได้แทนที่หรือควบคุมการตั้งค่า Defender real-time
 - `elevate` ใช้ `ShellExecuteW(... "runas" ...)` แล้วปิดโปรเซสเดิม
 
 ## 8. UI (`dashboard.html`)
-ธีมมืด เขียว/ฟ้า; แท็บ: แดชบอร์ด / กักกัน / Log / ตั้งค่า. องค์ประกอบ id สำคัญ: `ring` (คะแนน), `status`, `s1..s4` (การ์ดสถิติ), `chart`, `layers`, `det` (ตารางตรวจพบ + ปุ่ม กักกัน/ปลอดภัย), `ask` (แบนเนอร์ไฟล์รอตัดสินใจ), `prog`/`busy`/`stopb`, `term` (log), `qt`, `selfr`
+ธีมมืด เขียว/ฟ้า; แท็บ: แดชบอร์ด / กักกัน / Log / ตั้งค่า. องค์ประกอบ id สำคัญ: `ring` (คะแนน), `status`, `s1..s4` (การ์ดสถิติ), `chart`, `layers` (รวมสถานะ archive/Defender), `det` (ตารางตรวจพบ + ปุ่มกักกันทั้ง archive), `ask` (แบนเนอร์ไฟล์รอตัดสินใจ), `prog`/`busy`/`stopb`, `term` (log), `qt`, `selfr`; ปุ่ม Defender quick/full scan อยู่ในแดชบอร์ด
 poll `/api/state` ทุก 2 วิ และ `/api/log` ทุก 1 วิ; `esc()` escape ข้อความ; path ในปุ่มใช้ `encodeURIComponent` ใน `data-p`
 คะแนน = 100 − 30×HIGH − 5×(MEDIUM+LOW)
 
-## 9. การทดสอบ (`python -m unittest -v test_luna`) — 20 ข้อ ผ่านทั้งหมดบน Windows/Linux
+## 9. การทดสอบ (`python -m unittest -v test_luna`) — 29 ข้อ
 แฮชตรง · YARA XWorm · ไม่แจ้งผิดไฟล์ปกติ · ชื่อเลียนระบบ · loader=MEDIUM ไม่ถูก clean · PowerShell history · C2 connection · โดเมนหลอกลวงใน DNS · อัปเดตจาก abuse.ch (mock) · clean ครบวงจร+กู้คืน · MEDIUM→ผู้ใช้กักกัน · allowlist+กัน path ผิด · LOW · log ความคืบหน้า+ข้าม cache · ปุ่มหยุด · ประวัติ scan และ last result หลัง restart พร้อมรายละเอียด · normalize ThreatFox object + hash · retry 502 · update ล้มเหลวไม่เลื่อนเวลา · ไม่มี pywebview ก็ไม่เปิด browser หรือ server · บันทึกภาษาไทย/อังกฤษ/จีนตัวย่อและตรวจ locale keys
-วิธี mock: ตั้ง env (`LOCALAPPDATA`, `APPDATA`, `WINDIR` …) **ก่อน import**; แทน `lg.run`, `lg.winreg` (FakeReg), `lg.http`
+เพิ่มการทดสอบ nested archive + quarantine/restore, archive unpacked-size limit, และ Defender status/scan validation; วิธี mock: ตั้ง env (`LOCALAPPDATA`, `APPDATA`, `WINDIR` …) **ก่อน import**; แทน `lg.run`, `lg.winreg` (FakeReg), `lg.http`
 `PATH_RE` รองรับ path แบบ POSIX และ `user_writable`/`in_windows_dir` แปลง `/`→`\` เพื่อให้เทสต์บน Linux ได้
 
 ## 10. ข้อจำกัด / บั๊กที่เคยเจอ (สำคัญ)
@@ -94,7 +101,9 @@ poll `/api/state` ทุก 2 วิ และ `/api/log` ทุก 1 วิ; `e
 - สแกนนานมากเมื่อสแกนโฟลเดอร์ใหญ่/ทั้งไดรฟ์ (แก้บางส่วนด้วยการข้ามไฟล์ไม่ใช่โปรแกรม + cache dirs)
 - **บั๊กที่เพิ่งพบและแก้แล้ว**: dashboard ว่างเปล่าเพราะ JS syntax error (เครื่องหมาย `'` ซ้อนในสตริงปุ่ม "รันแบบ Admin"); และสถานะสแกนล่าสุดหายหลังปิดแอปเพราะเก็บไว้ในหน่วยความจำเท่านั้น
 - ThreatFox เคยใช้ query `taginfo` และวนข้อมูลโดยสมมติว่าเป็นรายการ ทำให้ API ที่ตอบ object เกิด `string indices must be integers`; เปลี่ยนเป็น `get_iocs` (7 วัน) และ normalize ข้อมูลก่อนบันทึก
-- ไม่มี real-time protection, ไม่ตรวจลายเซ็นดิจิทัล, ไม่สแกนหน่วยความจำ/ZIP/USB, ลบ Registry/Task ระดับ MEDIUM รายตัวยังไม่รองรับ
+- Luna Guard ไม่ใช่ real-time protection; มีเพียงการแสดงสถานะ/ส่งคำสั่งสแกนให้ Microsoft Defender และต้องตรวจสอบการตั้งค่า Defender ใน Windows Security แยกต่างหาก
+- มีการตรวจ archive เฉพาะรูปแบบ ZIP-based ที่ระบุและอยู่ภายใต้ขีดจำกัดข้างต้น; ไม่ตรวจหน่วยความจำหรือ USB โดยตรง, ไม่ตรวจลายเซ็นดิจิทัล, และไม่รับประกันการตรวจพบทุกตระกูล
+- Windows Defender integration, รวมถึงสิทธิ์และสถานะจริงของระบบ, ยังไม่ได้ยืนยันด้วยการสั่ง full scan จริง; การทดสอบ API ใช้ mock
 
 ## 11. Roadmap (เรียงตามความสำคัญ) + เกณฑ์ผ่าน
 1. **เทสต์ UI ใน repo**: jsdom/Playwright โหลด `dashboard.html` กับ server จริง — เกณฑ์: ไม่มี JS error, nav 4 แท็บ, ring วาดแล้ว, ตารางมีปุ่ม

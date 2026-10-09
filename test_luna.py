@@ -1,6 +1,6 @@
-"""25 test cases ของ Luna Guard  (รัน: python -m unittest -v test_luna)
+"""29 test cases ของ Luna Guard  (รัน: python -m unittest -v test_luna)
 ส่วนที่เป็นคำสั่ง Windows (netstat/schtasks/ipconfig/registry) จำลองผลลัพธ์ด้วย mock - ไฟล์/แฮช/YARA/กักกัน/ฐานข้อมูลทดสอบจริง"""
-import argparse, contextlib, hashlib, io, json, os, sys, tempfile, threading, unittest
+import argparse, contextlib, hashlib, io, json, os, sys, tempfile, threading, unittest, zipfile
 from pathlib import Path
 from unittest import mock
 from urllib.request import urlopen
@@ -66,6 +66,7 @@ class T(unittest.TestCase):
         lg.QUAR_DIR = case_dir / "quarantine"; lg.QUAR_INDEX = lg.QUAR_DIR / "index.json"
         lg.CONFIG = case_dir / "config.json"; lg.HISTORY = case_dir / "history.json"
         dashboard.LANGUAGE_FILE = case_dir / "settings.json"
+        dashboard.DEFENDER_STATUS.update(checked=0.0, value={"available": False})
         lg.LAST_SCAN.clear()
         CMDS.clear(); FakeReg.data[RUNKEY].clear(); OUT.update(netstat="", sch="", dns="", procs="[]")
 
@@ -295,6 +296,61 @@ class T(unittest.TestCase):
             server.shutdown()
             server.server_close()
             thread.join(timeout=5)
+
+    def test26_nested_zip_finding_can_be_quarantined_and_restored(self):
+        inner = io.BytesIO()
+        with zipfile.ZipFile(inner, "w", zipfile.ZIP_DEFLATED) as nested:
+            nested.writestr("payload.exe", XW)
+        outer_path = TMP / "bundle.zip"
+        with zipfile.ZipFile(outer_path, "w", zipfile.ZIP_DEFLATED) as outer:
+            outer.writestr("nested.zip", inner.getvalue())
+
+        _, result = scan(clean=True)
+        finding = next(item for item in result["findings"] if item["kind"] == "Archive member")
+        self.assertEqual(finding["sev"], "high")
+        self.assertIn("nested.zip!payload.exe", finding["target"])
+        self.assertTrue(outer_path.exists(), "automatic remediation must not replace an archive")
+        with contextlib.redirect_stdout(io.StringIO()):
+            qid = lg.remove_finding(str(outer_path))
+            lg.cmd_restore(argparse.Namespace(id=qid))
+        self.assertTrue(outer_path.exists())
+
+    def test27_archive_scan_enforces_unpacked_size_limit(self):
+        archive_path = TMP / "oversized.zip"
+        with zipfile.ZipFile(archive_path, "w", zipfile.ZIP_DEFLATED) as archive:
+            archive.writestr("payload.ps1", b"A" * 128)
+        old_limit, lg.MAX_ARCHIVE_UNPACKED = lg.MAX_ARCHIVE_UNPACKED, 64
+        try:
+            output, result = scan()
+        finally:
+            lg.MAX_ARCHIVE_UNPACKED = old_limit
+        self.assertFalse(any(item["kind"] == "Archive member" for item in result["findings"]))
+        self.assertIn("เกินขีดจำกัด", output)
+
+    def test28_defender_status_and_scan_commands_are_validated(self):
+        completed = __import__("subprocess").CompletedProcess(
+            args=[], returncode=0,
+            stdout=json.dumps({"available": True, "antivirus": True, "realtime": True, "behavior": True}),
+            stderr="",
+        )
+        with mock.patch.object(dashboard.lg, "IS_WIN", True), \
+                mock.patch.object(dashboard.subprocess, "run", return_value=completed) as run:
+            status = dashboard.defender_status(force=True)
+            self.assertTrue(status["realtime"])
+            dashboard.start_defender_scan("quick")
+            self.assertIn("QuickScan", run.call_args.args[0][-1])
+            with self.assertRaises(ValueError):
+                dashboard.start_defender_scan("arbitrary")
+        self.assertEqual(run.call_count, 2)
+
+    def test29_macro_enabled_office_archives_are_inspected(self):
+        office_path = TMP / "report.docm"
+        with zipfile.ZipFile(office_path, "w", zipfile.ZIP_DEFLATED) as office:
+            office.writestr("payload.exe", XW)
+        _, result = scan()
+        finding = next(item for item in result["findings"] if item["kind"] == "Archive member")
+        self.assertEqual(finding["sev"], "high")
+        self.assertEqual(finding["container"], str(office_path))
 
 
 if __name__ == "__main__":
