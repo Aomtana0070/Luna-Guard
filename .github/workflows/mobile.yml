@@ -24,7 +24,6 @@ jobs:
         with:
           channel: stable
           cache: true
-          cache-path: mobile
       - name: Generate Android platform project
         run: |
           flutter create --platforms=android --org com.lunaguard --project-name luna_guard_mobile mobile/platform_scaffold
@@ -57,7 +56,6 @@ jobs:
         with:
           channel: stable
           cache: true
-          cache-path: mobile
       - name: Generate iOS platform project
         run: |
           flutter create --platforms=ios --org com.lunaguard --project-name luna_guard_mobile mobile/platform_scaffold
