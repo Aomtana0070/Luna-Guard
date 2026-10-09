@@ -1,0 +1,94 @@
+<!doctype html>
+<html lang="th"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Luna Guard</title>
+<style>
+:root{--bg:#070b12;--card:#0e1520;--line:#1a2535;--tx:#e6edf6;--mu:#7d8da3;--ac:#22d3a8;--ac2:#38bdf8;--hi:#f87171;--md:#fbbf24;--ok:#34d399}
+*{box-sizing:border-box}body{margin:0;background:radial-gradient(900px 400px at 15% -10%,#0f2a33 0,transparent 60%),var(--bg);color:var(--tx);font:14px/1.5 "Segoe UI",system-ui,"Noto Sans Thai",sans-serif}
+header{display:flex;align-items:center;gap:16px;padding:14px 24px;border-bottom:1px solid var(--line);position:sticky;top:0;background:#070b12cc;backdrop-filter:blur(8px);z-index:5}
+.logo{width:38px;height:38px;border-radius:11px;background:linear-gradient(135deg,var(--ac),var(--ac2));display:grid;place-items:center;color:#04130f;font-weight:800}
+h1{font-size:16px;margin:0}small,.mu{color:var(--mu)}nav{margin:0 auto;display:flex;gap:4px;background:var(--card);border:1px solid var(--line);padding:4px;border-radius:12px}
+nav button{background:none;border:0;color:var(--mu);padding:7px 16px;border-radius:9px;cursor:pointer;font:inherit}nav button.on{background:#16324040;color:var(--tx);box-shadow:inset 0 0 0 1px #22d3a844}
+.pill{padding:4px 12px;border-radius:99px;font-size:12px;border:1px solid var(--line)}.pill.run{color:var(--ac);background:#22d3a81a;border-color:#22d3a840}
+main{max-width:1280px;margin:0 auto;padding:22px;display:grid;gap:16px}.tab{display:none}.tab.on{display:grid;gap:16px}
+.card{background:linear-gradient(180deg,#111b29,var(--card));border:1px solid var(--line);border-radius:16px;padding:18px}
+.card h3{margin:0 0 12px;font-size:11px;letter-spacing:.12em;text-transform:uppercase;color:var(--mu);font-weight:600}
+.hero{display:grid;grid-template-columns:200px 1fr;gap:24px;align-items:center}.stats{display:grid;grid-template-columns:repeat(4,1fr);gap:16px}
+.big{font-size:30px;font-weight:700;line-height:1.1}.row2{display:grid;grid-template-columns:1.2fr 1fr;gap:16px}
+.btns{display:flex;flex-wrap:wrap;gap:8px;margin-top:14px}
+button.b{background:#162231;color:var(--tx);border:1px solid var(--line);padding:9px 16px;border-radius:10px;cursor:pointer;font:inherit}button.b:hover{border-color:#22d3a860}
+button.p{background:linear-gradient(135deg,var(--ac),#19b894);color:#04130f;border:0;font-weight:700}button.d{border-color:#f8717160;color:var(--hi)}button:disabled{opacity:.4;cursor:wait}
+table{width:100%;border-collapse:collapse}th,td{text-align:left;padding:9px 8px;border-bottom:1px solid var(--line);font-size:13px;word-break:break-all}th{color:var(--mu);font-weight:500;font-size:11px;text-transform:uppercase}
+.bd{padding:2px 9px;border-radius:6px;font-size:11px;font-weight:700}.bd.high{background:#f8717122;color:var(--hi)}.bd.low{background:#38bdf822;color:var(--ac2)}.bd.medium{background:#fbbf2422;color:var(--md)}
+.layer{display:flex;justify-content:space-between;padding:8px 0;border-bottom:1px solid var(--line)}.dot{color:var(--ok)}.dot.off{color:var(--md)}
+#term{background:#05080d;border:1px solid var(--line);border-radius:12px;padding:12px;height:360px;overflow:auto;font:12px/1.7 Consolas,monospace}
+.l-high{color:var(--hi)}.l-med{color:var(--md)}.l-ok{color:var(--ok)}.l-warn{color:#fb923c}.t{color:#4b5b72;margin-right:8px}
+.history-wrap{overflow:auto;margin-top:12px}.history-table{min-width:680px}.history-table details{max-width:520px}.history-table summary{cursor:pointer;color:var(--ac2)}.history-items{margin:8px 0;padding-left:20px}.history-items li{margin:6px 0}.history-items .bd{margin-right:6px}
+input,select{background:#0a111b;border:1px solid var(--line);color:var(--tx);padding:9px 12px;border-radius:10px;font:inherit}input{width:100%}select{cursor:pointer}.guide-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:16px}.guide-grid p{margin:0;color:var(--mu)}.guide-note{border-color:#fbbf2460}.guide-intro{font-size:15px}
+.bar{height:6px;background:#162231;border-radius:9px;overflow:hidden;margin-top:10px}.bar i{display:block;height:100%;width:40%;background:linear-gradient(90deg,var(--ac),var(--ac2));animation:m 1.2s infinite ease-in-out}
+@keyframes m{0%{margin-left:-40%}100%{margin-left:100%}}@media(max-width:900px){.stats,.row2,.hero,.guide-grid{grid-template-columns:1fr 1fr}.row2{grid-template-columns:1fr}}
+</style></head><body>
+<header><div class="logo">L</div><div><h1>Luna Guard</h1><small data-i18n="brand.subtitle">Threat protection workspace</small></div>
+<nav id="nav"></nav><select id="language" aria-label="App language" onchange="changeLanguage(this.value)"><option value="th">ไทย</option><option value="en">English</option><option value="zh-CN">简体中文</option></select><span class="pill" id="pill">IDLE</span></header>
+<main>
+<section class="tab on" id="t-dash">
+ <div class="card hero"><svg viewBox="0 0 120 120" width="180" id="ring"></svg>
+  <div><div class="big" id="status">—</div><div class="mu" id="substatus"></div>
+   <div class="btns"><button class="b p" data-i18n="scan.quick" onclick="act('scan',{})">สแกนด่วน</button><button class="b" data-i18n="scan.full" onclick="act('scan',{full:true})">สแกนทั้งไดรฟ์ C:</button>
+   <button class="b d" data-i18n="scan.clean" onclick="if(confirm(t('action.confirmClean')))act('scan',{clean:true})">สแกน + กำจัด</button>
+   <button class="b" data-i18n="scan.update" onclick="act('update')">อัปเดตฐานข้อมูล</button><button class="b" data-i18n="scan.selftest" onclick="act('selftest')">ทดสอบตัวเอง</button><button class="b d" id="stopb" data-i18n="scan.stop" style="display:none" onclick="api('stop',{})">หยุดสแกน</button></div>
+   <div class="bar" id="busy" style="display:none"><i></i></div><div class="mu" id="prog" style="margin-top:8px;font-size:12px;word-break:break-all"></div></div></div>
+ <div class="card" id="ask" style="display:none;border-color:#fbbf2460"></div>
+ <div class="stats">
+  <div class="card"><h3 data-i18n="card.threatDb">ฐานข้อมูลภัยคุกคาม</h3><div class="big" id="s1">0</div><small class="mu" id="s1b"></small></div>
+  <div class="card"><h3 data-i18n="card.scannedFiles">ไฟล์ที่ตรวจล่าสุด</h3><div class="big" id="s2">0</div><small class="mu" id="s2b"></small></div>
+  <div class="card"><h3 data-i18n="card.latestThreats">ภัยคุกคามล่าสุด</h3><div class="big" id="s3">0</div><small class="mu" id="s3b"></small></div>
+  <div class="card"><h3 data-i18n="card.quarantine">กักกัน</h3><div class="big" id="s4">0</div><small class="mu" data-i18n="stats.quarantined">ไฟล์ที่ถูกกักกัน</small></div></div>
+ <div class="row2"><div class="card"><h3 data-i18n="card.history">ประวัติการสแกน</h3><svg id="chart" viewBox="0 0 600 160" width="100%"></svg>
+  <div class="mu"><span style="color:#f87171">■ HIGH</span> &nbsp; <span style="color:#fbbf24">■ MEDIUM</span> &nbsp; <span style="color:#38bdf8">■ LOW</span></div><div class="history-wrap"><table class="history-table"><thead><tr><th data-i18n="table.time">เวลา</th><th data-i18n="table.mode">โหมด</th><th data-i18n="table.files">ไฟล์</th><th data-i18n="table.counts">HIGH / MEDIUM / LOW</th><th data-i18n="table.details">รายละเอียด</th></tr></thead><tbody id="history"></tbody></table></div></div>
+  <div class="card"><h3 data-i18n="card.protection">ชั้นการป้องกัน</h3><div id="layers"></div></div></div>
+ <div class="card"><h3 data-i18n="card.detections">การตรวจพบล่าสุด</h3><table><thead><tr><th data-i18n="table.severity">ระดับ</th><th data-i18n="table.type">ประเภท</th><th data-i18n="table.target">เป้าหมาย</th><th data-i18n="table.reason">เหตุผล</th><th data-i18n="table.actions"></th></tr></thead><tbody id="det"></tbody></table></div>
+ <div class="card" id="selfc" style="display:none"><h3 data-i18n="card.selftest">ผลทดสอบตัวเอง</h3><div id="selfr"></div></div>
+</section>
+<section class="tab" id="t-quar"><div class="card"><h3 data-i18n="quarantine.title">ไฟล์ที่ถูกกักกัน</h3><table><thead><tr><th>ID</th><th data-i18n="table.originalPath">ที่อยู่เดิม</th><th data-i18n="table.reason">เหตุผล</th><th data-i18n="table.actions"></th></tr></thead><tbody id="qt"></tbody></table></div></section>
+<section class="tab" id="t-log"><div class="card"><h3 data-i18n="log.title">บันทึกการทำงาน</h3><div id="term"></div></div></section>
+<section class="tab" id="t-guide"><div class="card"><h2 data-i18n="guide.title">คู่มือการใช้งาน Luna Guard</h2><p class="guide-intro" data-i18n="guide.intro"></p>
+ <div class="guide-grid"><article class="card"><h3 data-i18n="guide.scanTitle"></h3><p data-i18n="guide.scanText"></p></article><article class="card"><h3 data-i18n="guide.reviewTitle"></h3><p data-i18n="guide.reviewText"></p></article>
+ <article class="card"><h3 data-i18n="guide.restoreTitle"></h3><p data-i18n="guide.restoreText"></p></article><article class="card"><h3 data-i18n="guide.updateTitle"></h3><p data-i18n="guide.updateText"></p></article>
+ <article class="card"><h3 data-i18n="guide.sourcesTitle"></h3><p data-i18n="guide.sourcesText"></p></article><article class="card"><h3 data-i18n="guide.limitsTitle"></h3><p data-i18n="guide.limitsText"></p></article>
+ <article class="card guide-note"><h3 data-i18n="guide.safetyTitle"></h3><p data-i18n="guide.safetyText"></p></article></div></div></section>
+<section class="tab" id="t-set"><div class="card" style="max-width:560px"><h3 data-i18n="settings.title">การตั้งค่า</h3>
+ <label for="language" data-i18n="settings.language">ภาษาแอป</label><p class="mu" data-i18n="settings.languageSaved" id="langst"></p>
+ <h3 data-i18n="settings.apiKey">คีย์ abuse.ch</h3><p class="mu" data-i18n="settings.apiKeyHelp"></p>
+ <input id="key" type="password" data-i18n-placeholder="settings.keyPlaceholder" placeholder="วางคีย์ที่นี่"><div class="btns"><button class="b p" data-i18n="settings.save" onclick="saveKey()">บันทึก</button></div><p class="mu" id="keyst"></p></div></section>
+</main>
+<script>
+const T=new URLSearchParams(location.search).get('t'),$=i=>document.getElementById(i),esc=s=>String(s).replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));
+const api=(p,b)=>fetch('/api/'+p,{method:b?'POST':'GET',headers:{'X-T':T},body:b?JSON.stringify(b):undefined}).then(r=>r.json());
+let locale={},currentLanguage='th',currentTab='dash';
+function t(key,values={}){const text=(locale[currentLanguage]||locale.th||{})[key]||key;return text.replace(/\{(\w+)\}/g,(_,name)=>values[name]??'')}
+function applyLanguage(language){currentLanguage=locale[language]?language:'th';document.documentElement.lang=currentLanguage;$('language').value=currentLanguage;document.querySelectorAll('[data-i18n]').forEach(el=>{el.textContent=t(el.dataset.i18n)});document.querySelectorAll('[data-i18n-placeholder]').forEach(el=>{el.placeholder=t(el.dataset.i18nPlaceholder)});$('nav').innerHTML=[['dash','nav.dashboard'],['quar','nav.quarantine'],['log','nav.log'],['guide','nav.guide'],['set','nav.settings']].map(([k,key])=>`<button data-k="${k}" onclick="go('${k}')">${t(key)}</button>`).join('');go(currentTab)}
+async function changeLanguage(language){const previous=currentLanguage,result=await api('language',{language});if(!result.ok){$('language').value=previous;$('langst').textContent=t('settings.languageSaveFailed');return}applyLanguage(language);$('langst').textContent=t('settings.languageSaved');poll()}
+function go(k){currentTab=k;document.querySelectorAll('.tab').forEach(e=>e.classList.toggle('on',e.id=='t-'+k));document.querySelectorAll('nav button').forEach(e=>e.classList.toggle('on',e.dataset.k==k))}
+async function act(p,b){const r=await api(p,b||{});if(!r.ok)alert(t('action.busy'));poll()}
+async function dec(a,el){const p=decodeURIComponent(el.dataset.p);if(a=='remove'&&!confirm(t('action.confirmQuarantine',{path:p})))return;if(a=='allow'&&!confirm(t('action.confirmAllow')))return;await api(a,{path:p});poll()}
+async function saveKey(){await api('key',{key:$('key').value});$('key').value='';poll()}
+async function restore(id){if(confirm(t('action.confirmRestore'))){await api('restore',{id});poll()}}
+function ring(score,col){const c=2*Math.PI*48,o=c*(1-score/100);$('ring').innerHTML=`<circle cx="60" cy="60" r="48" fill="none" stroke="#162231" stroke-width="10"/><circle cx="60" cy="60" r="48" fill="none" stroke="${col}" stroke-width="10" stroke-linecap="round" stroke-dasharray="${c}" stroke-dashoffset="${o}" transform="rotate(-90 60 60)"/><text x="60" y="66" text-anchor="middle" fill="#e6edf6" font-size="26" font-weight="700">${score}</text>`}
+async function poll(){const s=await api('state');if(s.language&&s.language!=currentLanguage)applyLanguage(s.language);const L=s.last||{},F=L.findings||[],hi=Array.isArray(L.findings)?F.filter(f=>f.sev=='high').length:Number(L.high)||0,md=Array.isArray(L.findings)?F.filter(f=>f.sev=='medium').length:Number(L.medium)||0,lo=Array.isArray(L.findings)?F.filter(f=>f.sev=='low').length:Number(L.low)||0;
+ $('pill').textContent=s.job?'● '+s.job:t('status.idle');$('pill').className='pill'+(s.job?' run':'');$('busy').style.display=s.job?'block':'none';const pg=s.prog||{};$('prog').textContent=s.job&&pg.stage?pg.stage+(pg.files?' · '+pg.files.toLocaleString():'')+(pg.path?' · '+pg.path:''):'';$('stopb').style.display=(s.job&&s.job.includes('สแกน'))?'inline-block':'none';
+ let score=100-hi*30-(md+lo)*5,status=t('status.safe'),sub=t('status.lastScan',{time:L.time||'-'}),color=hi?'#f87171':(md||lo)?'#fbbf24':'#34d399';
+ if(!L.time){status=t('status.neverScanned');color='#38bdf8';score=0;sub=t('status.startHint')}else if(hi)status=t('status.threat');else if(md||lo)status=t('status.review');
+ if(!s.updated)sub+=' · '+t('status.databaseStale');ring(Math.max(score,0),color);$('status').textContent=status;$('substatus').textContent=sub;
+ $('s1').textContent=s.hashes+s.iocs;$('s1b').textContent=t('stats.hashIocUpdated',{hashes:s.hashes,iocs:s.iocs,updated:s.updated||'-'});
+ $('s2').textContent=L.files||0;$('s2b').textContent=L.clean?t('stats.modeClean'):t('stats.modeScan');$('s3').textContent=hi+md+lo;$('s3b').textContent=t('stats.severity',{high:hi,medium:md,low:lo});$('s4').textContent=s.quar.length;const pending=F.filter(f=>f.kind=='ไฟล์').length;$('ask').style.display=pending?'block':'none';$('ask').textContent=pending?t('action.scanReview',{count:pending}):'';
+ const layers=[['layer.hash',s.hashes>0],['layer.yara',s.yara],['layer.persistence',true],['layer.network',s.iocs>0],['layer.dns',s.iocs>0],['layer.psHistory',true],['layer.admin',s.admin]],adminButton=s.admin?'':` <button class="b" onclick="if(confirm(&quot;${t('action.confirmAdmin')}&quot;))act('elevate')">${t('layer.runAdmin')}</button>`;
+ $('layers').innerHTML=layers.map(([key,ready])=>`<div class="layer"><span>${t(key==='layer.hash'&&!s.hashes?'stats.noHashes':key)}</span><span class="dot ${ready?'':'off'}">${ready?t('layer.ready'):t('layer.unavailable')}${key==='layer.admin'?adminButton:''}</span></div>`).join('');
+ $('det').innerHTML=F.length?F.map(f=>`<tr><td><span class="bd ${f.sev}">${t('severity.'+f.sev)}</span></td><td>${esc(f.kind)}</td><td>${esc(f.target)}</td><td class="mu">${esc(f.why)}</td><td style="white-space:nowrap">${f.kind=='ไฟล์'?`<button class="b" data-p="${encodeURIComponent(f.target)}" onclick="dec('remove',this)">${t('action.quarantine')}</button> <button class="b" data-p="${encodeURIComponent(f.target)}" onclick="dec('allow',this)">${t('action.allow')}</button>`:''}</td></tr>`).join(''):(hi+md+lo?`<tr><td colspan="5" class="mu">${t('action.previousScanTotals')}</td></tr>`:`<tr><td colspan="5" class="mu">${t('action.noFindings')}</td></tr>`);
+ const h=s.hist||[],mx=Math.max(1,...h.map(x=>(x.high||0)+(x.medium||0)+(x.low||0))); $('chart').innerHTML=h.length?h.map((x,i)=>{const w=600/Math.max(h.length,8),a=(x.high||0)/mx*130,b=(x.medium||0)/mx*130,c=(x.low||0)/mx*130;return `<rect x="${i*w+4}" y="${150-a-b-c}" width="${w-8}" height="${c}" rx="3" fill="#38bdf8"/><rect x="${i*w+4}" y="${150-a-b}" width="${w-8}" height="${b}" rx="3" fill="#fbbf24"/><rect x="${i*w+4}" y="${150-a}" width="${w-8}" height="${a}" rx="3" fill="#f87171"/><rect x="${i*w+4}" y="148" width="${w-8}" height="3" rx="1" fill="#22d3a8"/>`}).join(''): `<text x="300" y="80" text-anchor="middle" fill="#7d8da3">${t('action.noHistory')}</text>`;
+ $('history').innerHTML=h.length?[...h].reverse().map(x=>{const items=Array.isArray(x.findings)?x.findings:[],total=Number(x.findings_total)||items.length||(Number(x.high)||0)+(Number(x.medium)||0)+(Number(x.low)||0),totalText=total>items.length?` / ${total}`:'',details=items.length?`<details><summary>${t('action.viewDetails',{shown:items.length,totalText})}</summary><ul class="history-items">${items.map(f=>{const severity=['high','medium','low'].includes(f.sev)?f.sev:'low';return `<li><span class="bd ${severity}">${t('severity.'+severity)}</span> ${esc(f.kind||'')} — ${esc(f.target||'')}<br><span class="mu">${esc(f.why||'')}</span></li>`}).join('')}</ul>${total>items.length?`<span class="mu">${t('action.moreFindings',{count:items.length})}</span>`:''}</details>`:`<span class="mu">${total?t('action.oldHistory'):t('action.noFindings')}</span>`;return `<tr><td>${esc(x.time||'-')}</td><td>${x.clean?t('stats.modeClean'):t('stats.modeScan')}</td><td>${Number(x.files)||0}</td><td>${Number(x.high)||0} / ${Number(x.medium)||0} / ${Number(x.low)||0}</td><td>${details}</td></tr>`}).join(''):`<tr><td colspan="5" class="mu">${t('action.noHistory')}</td></tr>`;
+ $('qt').innerHTML=s.quar.length?s.quar.map(q=>`<tr><td>${q.id}</td><td>${esc(q.original)}</td><td class="mu">${esc(q.why.join('; '))}</td><td><button class="b" onclick="restore('${q.id}')">${t('action.restore')}</button></td></tr>`).join(''):`<tr><td colspan="4" class="mu">${t('action.noQuarantine')}</td></tr>`;
+ $('selfc').style.display=s.self?'block':'none';if(s.self)$('selfr').innerHTML=s.self.map(x=>`<div class="layer"><span>${esc(x.name)}</span><span class="${x.ok?'l-ok':'l-high'}">${x.ok?'PASS':'FAIL'}</span></div>`).join('');
+ $('keyst').textContent=s.key?t('settings.keySaved'):t('settings.keyMissing')}
+let n=0;async function plog(){const r=await api('log?since='+n),t=$('term');r.lines.forEach(l=>{t.insertAdjacentHTML('beforeend',`<div class="l-${l.l}"><span class="t">${l.t}</span>${esc(l.m)}</div>`)});if(r.lines.length){n+=r.lines.length;t.scrollTop=t.scrollHeight}}
+async function init(){try{locale=await api('locales');const state=await api('state');applyLanguage(state.language||'th');await poll();await plog();setInterval(poll,2000);setInterval(plog,1000)}catch(error){console.error('Luna Guard initialization failed',error);document.body.insertAdjacentHTML('afterbegin',`<div class="alert">${esc(error.message||String(error))}</div>`)}}init();
+</script></body></html>

@@ -1,0 +1,19 @@
+.venv/
+__pycache__/
+*.py[cod]
+build/
+dist/
+LunaGuard.spec
+
+# Per-device settings, threat data, scan history, and quarantined files
+settings.json
+config.json
+threats.db
+history.json
+quarantine/
+rules/
+
+# Python and editor noise
+.pytest_cache/
+.vscode/
+*.log
