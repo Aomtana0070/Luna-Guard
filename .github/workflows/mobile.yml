@@ -25,14 +25,11 @@ jobs:
           channel: stable
           cache: true
           cache-path: mobile
-      - name: Generate Android and iOS platform projects
+      - name: Generate Android platform project
         run: |
-          flutter create --platforms=android,ios --org com.lunaguard --project-name luna_guard_mobile mobile/platform_scaffold
+          flutter create --platforms=android --org com.lunaguard --project-name luna_guard_mobile mobile/platform_scaffold
           cp -R mobile/platform_scaffold/android mobile/android
-          cp -R mobile/platform_scaffold/ios mobile/ios
           sed -i 's/android:label="luna_guard_mobile"/android:label="Luna Guard"/' mobile/android/app/src/main/AndroidManifest.xml
-          perl -0pi -e "s/# platform :ios, '[^']*'/platform :ios, '14.0'/" mobile/ios/Podfile
-          /usr/libexec/PlistBuddy -c "Set :CFBundleDisplayName Luna Guard" mobile/ios/Runner/Info.plist
           rm -rf mobile/platform_scaffold
       - name: Get dependencies
         working-directory: mobile
@@ -61,12 +58,10 @@ jobs:
           channel: stable
           cache: true
           cache-path: mobile
-      - name: Generate Android and iOS platform projects
+      - name: Generate iOS platform project
         run: |
-          flutter create --platforms=android,ios --org com.lunaguard --project-name luna_guard_mobile mobile/platform_scaffold
-          cp -R mobile/platform_scaffold/android mobile/android
+          flutter create --platforms=ios --org com.lunaguard --project-name luna_guard_mobile mobile/platform_scaffold
           cp -R mobile/platform_scaffold/ios mobile/ios
-          sed -i 's/android:label="luna_guard_mobile"/android:label="Luna Guard"/' mobile/android/app/src/main/AndroidManifest.xml
           perl -0pi -e "s/# platform :ios, '[^']*'/platform :ios, '14.0'/" mobile/ios/Podfile
           /usr/libexec/PlistBuddy -c "Set :CFBundleDisplayName Luna Guard" mobile/ios/Runner/Info.plist
           rm -rf mobile/platform_scaffold
