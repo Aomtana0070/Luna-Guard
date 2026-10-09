@@ -29,11 +29,13 @@ import shutil
 import sqlite3
 import subprocess
 import sys
+import tempfile
 import time
 import urllib.parse
 import urllib.error
 import urllib.request
 import zipfile
+import zlib
 from pathlib import Path
 
 try:
@@ -46,10 +48,7 @@ APP_DIR = Path(os.environ.get("LOCALAPPDATA", str(Path.home()))) / "LunaGuard"
 DB_PATH = APP_DIR / "threats.db"
 QUAR_DIR = APP_DIR / "quarantine"
 QUAR_INDEX = QUAR_DIR / "index.json"
-MAX_ARCHIVE_ENTRIES = 1000
-MAX_ARCHIVE_UNPACKED = 256 * 1024 * 1024
 ARCHIVE_EXT = {".zip", ".jar", ".docx", ".docm", ".xlsx", ".xlsm", ".pptx", ".pptm", ".apk"}
-MAX_ARCHIVE_DEPTH = 2
 TAGS = ["XWorm", "MrBeast"]  # แท็กที่ดึงจาก MalwareBazaar / ThreatFox
 
 # โดเมนหลอกลวงที่รู้จัก (เพิ่มเองได้ด้วยการแก้ลิสต์นี้)
@@ -159,17 +158,6 @@ def yara_rules():
     except Exception as e:
         print(f"[!] คอมไพล์กฎ YARA ไม่ผ่าน: {e}")
     return _YARA["rules"]
-
-
-def yara_scan(data):
-    r = yara_rules()
-    if not r:
-        return []
-    try:
-        return [{"rule": m.rule, "severity": m.meta.get("severity", "high")} for m in r.match(data=data, timeout=30)]
-    except Exception as e:
-        scan_issue(f"YARA ตรวจข้อมูลที่อ่านมาไม่สำเร็จ: {e}")
-        return []
 
 
 def yara_scan_file(path):
@@ -433,31 +421,20 @@ def inspect_file_stream(path):
         len(patterns) - 2 in found and len(patterns) - 1 in found
 
 
-def analyze_data(path, data, con):
-    """Analyze bounded in-memory data such as a member within an archive."""
-    is_pe = data[:2] == b"MZ"
-    lower = data.lower()
-    strong_xworm = any(pat in lower or pat.decode().encode("utf-16le").lower() in lower
-                       for pat in STRONG_PATTERNS)
-    return classify_analysis(
-        path, hashlib.sha256(data).hexdigest(), con, yara_scan(data), is_pe, strong_xworm,
-        b"mscoree.dll" in lower and b"bsjb" in lower,
-    )
-
-
-def analyze(path, con):
+def analyze(path, con, logical_path=None):
     """Analyze files of any size without loading the entire file into memory."""
+    display_path = logical_path or path
     try:
         size = os.path.getsize(path)
         if size < 64:
             return None, [], ""
         with open(path, "rb") as fh:
             prefix = fh.read(2)
-        if Path(path).suffix.lower() not in SCRIPT_EXT and prefix != b"MZ":
+        if Path(display_path).suffix.lower() not in SCRIPT_EXT and prefix != b"MZ":
             return None, [], ""
         sha, prefix, strong_xworm, dotnet = inspect_file_stream(path)
     except OSError as e:
-        scan_issue(f"อ่านไฟล์ไม่สำเร็จ {path}: {e}")
+        scan_issue(f"อ่านไฟล์ไม่สำเร็จ {display_path}: {e}")
         return None, [], ""
     is_pe = prefix == b"MZ"
     row = con.execute("SELECT family FROM hashes WHERE sha256=?", (sha,)).fetchone()
@@ -466,111 +443,116 @@ def analyze(path, con):
     if con.execute("SELECT 1 FROM allow WHERE sha256=?", (sha,)).fetchone():
         return None, [], sha
     return classify_analysis(
-        path, sha, con, yara_scan_file(path) if Path(path).suffix.lower() in SCRIPT_EXT else [],
+        display_path, sha, con,
+        yara_scan_file(path) if Path(display_path).suffix.lower() in SCRIPT_EXT else [],
         is_pe, strong_xworm, dotnet,
     )
 
 
-def scan_archive(path, con, budget=None, depth=0):
-    """Inspect ZIP-based archives on disk without a compressed-file size limit."""
-    budget = budget if budget is not None else {"entries": 0, "bytes": 0}
+def scan_archive(path, con):
+    """Stream inspectable ZIP members through disk-backed temporary files."""
     findings = []
-    try:
-        archive = zipfile.ZipFile(path)
-    except OSError as e:
-        scan_issue(f"อ่าน archive ไม่สำเร็จ {path}: {e}")
-        return findings
-    except zipfile.BadZipFile:
-        scan_issue(f"ไฟล์ archive เสียหรืออ่านไม่ได้: {path}")
-        return findings
+    archive_stack = []
+    container = str(path)
 
-    with archive:
-        for info in archive.infolist():
+    def push_archive(source, label, temporary_path=None):
+        archive = None
+        try:
+            archive = zipfile.ZipFile(source)
+            entries = iter(archive.infolist())
+        except (OSError, RuntimeError, zipfile.BadZipFile, EOFError) as e:
+            if archive:
+                close_archive(archive, label)
+            scan_issue(f"อ่าน archive ไม่สำเร็จ {label}: {e}")
+            if temporary_path:
+                remove_temporary(temporary_path, label)
+            return
+        archive_stack.append({
+            "archive": archive, "entries": entries, "label": label,
+            "temporary_path": temporary_path,
+        })
+
+    def remove_temporary(temporary_path, label):
+        try:
+            Path(temporary_path).unlink(missing_ok=True)
+        except OSError as e:
+            scan_issue(f"ลบไฟล์ชั่วคราวของ archive ไม่สำเร็จ {label}: {e}")
+
+    def close_archive(archive, label):
+        try:
+            archive.close()
+        except OSError as e:
+            scan_issue(f"ปิด archive ไม่สำเร็จ {label}: {e}")
+
+    def close_frame(frame):
+        close_archive(frame["archive"], frame["label"])
+        if frame["temporary_path"]:
+            remove_temporary(frame["temporary_path"], frame["label"])
+
+    push_archive(path, container)
+    try:
+        while archive_stack:
+            if STOP["flag"]:
+                break
+            frame = archive_stack[-1]
+            try:
+                info = next(frame["entries"])
+            except StopIteration:
+                close_frame(archive_stack.pop())
+                continue
+            except (OSError, RuntimeError, zipfile.BadZipFile, EOFError) as e:
+                scan_issue(f"อ่านรายการ archive ไม่สำเร็จ {frame['label']}: {e}")
+                close_frame(archive_stack.pop())
+                continue
             if info.is_dir():
                 continue
-            if budget["entries"] >= MAX_ARCHIVE_ENTRIES:
-                scan_issue(f"ถึงขีดจำกัดจำนวนรายการใน archive แล้ว ({MAX_ARCHIVE_ENTRIES}): {path}")
-                break
-            budget["entries"] += 1
+            target = f"{frame['label']}!{info.filename}"
             if info.flag_bits & 0x1:
-                scan_issue(f"ข้ามไฟล์ใน archive ที่เข้ารหัสไว้: {path}!{info.filename}")
+                scan_issue(f"ข้ามไฟล์ใน archive ที่เข้ารหัสไว้: {target}")
                 continue
-            remaining = MAX_ARCHIVE_UNPACKED - budget["bytes"]
-            if info.file_size > remaining:
-                scan_issue(f"ข้ามไฟล์ใน archive ที่เกินงบข้อมูลคลายบีบอัด: {path}!{info.filename}")
-                continue
+            suffix = Path(info.filename).suffix.lower()
+            is_script = suffix in SCRIPT_EXT
+            is_archive = suffix in ARCHIVE_EXT
+            member_temp_path = None
             try:
-                with archive.open(info) as member:
-                    data = member.read(remaining + 1)
-            except (OSError, RuntimeError, zipfile.BadZipFile, EOFError) as e:
-                scan_issue(f"อ่านไฟล์ใน archive ไม่สำเร็จ {path}!{info.filename}: {e}")
-                continue
-            if len(data) > remaining:
-                scan_issue(f"ข้ามไฟล์ใน archive ที่เกินงบข้อมูลคลายบีบอัด: {path}!{info.filename}")
-                continue
-            budget["bytes"] += len(data)
-            target = f"{path}!{info.filename}"
-            if len(data) >= 64 and (Path(info.filename).suffix.lower() in SCRIPT_EXT or data[:2] == b"MZ"):
-                severity, reasons, _ = analyze_data(info.filename, data, con)
-                if severity:
-                    findings.append({
-                        "sev": severity, "kind": "Archive member", "target": target,
-                        "why": "; ".join(reasons), "container": str(path),
-                    })
-            if len(data) >= 4 and Path(info.filename).suffix.lower() in ARCHIVE_EXT:
-                if depth + 1 < MAX_ARCHIVE_DEPTH:
-                    findings.extend(scan_archive_bytes(data, target, con, budget, depth + 1))
-                else:
-                    scan_issue(f"ข้าม nested archive ที่เกินความลึกที่กำหนด: {target}")
-    return findings
-
-
-def scan_archive_bytes(data, label, con, budget, depth):
-    """Inspect a nested ZIP already bounded by its parent archive."""
-    findings = []
-    try:
-        archive = zipfile.ZipFile(io.BytesIO(data))
-    except (OSError, zipfile.BadZipFile) as e:
-        scan_issue(f"nested archive เสียหรืออ่านไม่ได้ {label}: {e}")
-        return findings
-    with archive:
-        for info in archive.infolist():
-            if info.is_dir():
-                continue
-            if budget["entries"] >= MAX_ARCHIVE_ENTRIES:
-                scan_issue(f"ถึงขีดจำกัดจำนวนรายการใน archive แล้ว ({MAX_ARCHIVE_ENTRIES}): {label}")
-                break
-            budget["entries"] += 1
-            if info.flag_bits & 0x1:
-                scan_issue(f"ข้ามไฟล์ใน archive ที่เข้ารหัสไว้: {label}!{info.filename}")
-                continue
-            remaining = MAX_ARCHIVE_UNPACKED - budget["bytes"]
-            if info.file_size > remaining:
-                scan_issue(f"ข้ามไฟล์ใน archive ที่เกินงบข้อมูลคลายบีบอัด: {label}!{info.filename}")
-                continue
-            try:
-                with archive.open(info) as member:
-                    contents = member.read(remaining + 1)
-            except (OSError, RuntimeError, zipfile.BadZipFile, EOFError) as e:
-                scan_issue(f"อ่านไฟล์ใน archive ไม่สำเร็จ {label}!{info.filename}: {e}")
-                continue
-            if len(contents) > remaining:
-                scan_issue(f"ข้ามไฟล์ใน archive ที่เกินงบข้อมูลคลายบีบอัด: {label}!{info.filename}")
-                continue
-            budget["bytes"] += len(contents)
-            target = f"{label}!{info.filename}"
-            if len(contents) >= 64 and (Path(info.filename).suffix.lower() in SCRIPT_EXT or contents[:2] == b"MZ"):
-                severity, reasons, _ = analyze_data(info.filename, contents, con)
-                if severity:
-                    findings.append({
-                        "sev": severity, "kind": "Archive member", "target": target,
-                        "why": "; ".join(reasons), "container": label.split("!")[0],
-                    })
-            if len(contents) >= 4 and Path(info.filename).suffix.lower() in ARCHIVE_EXT:
-                if depth + 1 < MAX_ARCHIVE_DEPTH:
-                    findings.extend(scan_archive_bytes(contents, target, con, budget, depth + 1))
-                else:
-                    scan_issue(f"ข้าม nested archive ที่เกินความลึกที่กำหนด: {target}")
+                with frame["archive"].open(info) as member:
+                    prefix = member.read(4)
+                    is_nested_zip = prefix.startswith((b"PK\x03\x04", b"PK\x05\x06", b"PK\x07\x08"))
+                    if not (is_script or is_archive or prefix[:2] == b"MZ" or is_nested_zip):
+                        while member.read(1024 * 1024) and not STOP["flag"]:
+                            pass
+                        if STOP["flag"]:
+                            break
+                        continue
+                    with tempfile.NamedTemporaryFile(
+                        prefix="lunaguard-archive-", suffix=suffix or ".bin", delete=False
+                    ) as extracted:
+                        member_temp_path = extracted.name
+                        extracted.write(prefix)
+                        while chunk := member.read(1024 * 1024):
+                            if STOP["flag"]:
+                                break
+                            extracted.write(chunk)
+                if STOP["flag"]:
+                    break
+                if is_script or prefix[:2] == b"MZ":
+                    severity, reasons, _ = analyze(member_temp_path, con, logical_path=info.filename)
+                    if severity:
+                        findings.append({
+                            "sev": severity, "kind": "Archive member", "target": target,
+                            "why": "; ".join(reasons), "container": container,
+                        })
+                if is_archive or is_nested_zip:
+                    push_archive(member_temp_path, target, member_temp_path)
+                    member_temp_path = None
+            except (OSError, RuntimeError, zipfile.BadZipFile, EOFError, NotImplementedError, zlib.error) as e:
+                scan_issue(f"อ่านหรือจัดเก็บไฟล์ใน archive ไม่สำเร็จ {target}: {e}")
+            finally:
+                if member_temp_path:
+                    remove_temporary(member_temp_path, target)
+    finally:
+        while archive_stack:
+            close_frame(archive_stack.pop())
     return findings
 
 
@@ -804,7 +786,6 @@ def cmd_scan(args):
         scan_issue("ไม่มี YARA rules หรือ yara-python; ข้ามการตรวจด้วยกฎและหน่วยความจำ")
     roots = [r"C:\\"] if args.full else (args.paths or default_scan_dirs())
     high_files, findings, archive_findings = {}, [], []
-    archive_budget = {"entries": 0, "bytes": 0}
 
     print(f"[1/5] สแกนไฟล์ ({len(roots)} โฟลเดอร์)...")
     count, t0, STOP["flag"] = 0, time.time(), False
@@ -826,7 +807,7 @@ def cmd_scan(args):
                 if sev == "high":
                     high_files[f] = (sha, why)
             if Path(f).suffix.lower() in ARCHIVE_EXT:
-                archive_findings.extend(scan_archive(f, con, archive_budget))
+                archive_findings.extend(scan_archive(f, con))
         print(f"      ✔ จบ: {root} — {rc:,} ไฟล์ ใช้ {int(time.time() - rt)} วิ")
         if STOP["flag"]:
             print("[!] ผู้ใช้สั่งหยุดสแกนไฟล์ - ข้ามไปตรวจขั้นตอนที่เหลือ")

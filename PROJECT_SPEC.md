@@ -60,10 +60,11 @@
 โฟลเดอร์ค่าเริ่มต้น: `%TEMP%`, `%APPDATA%`, `%LOCALAPPDATA%`, `%PROGRAMDATA%`, `C:\Users\Public`, `Downloads`, โฟลเดอร์ Startup
 
 ### การตรวจ archive และหน่วยความจำ
-- ตรวจ `.zip`, `.jar`, `.docx/.docm`, `.xlsx/.xlsm`, `.pptx/.pptm`, `.apk` โดยอ่าน archive จาก disk และตรวจสมาชิกโดยไม่แตกไฟล์ลงดิสก์; ไม่มีเพดานขนาด compressed archive หรือขนาดไฟล์ปกติ
-- ยังคงจำกัด archive ที่ `MAX_ARCHIVE_ENTRIES` (1,000) รายการ, ข้อมูลคลายบีบอัดรวมต่อการสแกน `MAX_ARCHIVE_UNPACKED` (256 MiB), และ nested archive ลึก `MAX_ARCHIVE_DEPTH` (2) เพื่อป้องกัน zip bomb; รายการเข้ารหัส/เกินขีดจำกัดจะทำเครื่องหมายผลสแกนว่าไม่ครบ
+- ตรวจ `.zip`, `.jar`, `.docx/.docm`, `.xlsx/.xlsm`, `.pptx/.pptm`, `.apk` โดย stream สมาชิกเป้าหมายผ่านไฟล์ชั่วคราวบน disk; ไม่มีเพดานในแอปสำหรับจำนวนสมาชิก, ข้อมูลคลายบีบอัดรวม, ความลึก nested archive หรือขนาดไฟล์ปกติ
+- การอ่านข้อมูลสมาชิกใช้ buffer 1 MiB จึงไม่เก็บข้อมูลคลายบีบอัดทั้งสมาชิกใน RAM; แต่ ZIP central-directory metadata ยังอยู่ในหน่วยความจำตามการทำงานของ `zipfile` และใช้ RAM เพิ่มตามจำนวนสมาชิก ส่วนพื้นที่ดิสก์/เวลาเพิ่มตามข้อมูลที่ต้องตรวจ; ดิสก์เต็ม, สิทธิ์, ข้อมูลเสียหาย, เข้ารหัส หรือ compression ที่ไม่รองรับจะทำเครื่องหมายผลสแกนว่าไม่ครบ ไม่มีการข้ามเงียบ
+- สำรวจ nested ZIP แบบ iterative ไม่ใช้การเรียกซ้ำของ Python; finding ระบุสมาชิก nested และ container ต้นฉบับ การกักกันทำกับ archive ต้นฉบับทั้งไฟล์
 - YARA ตรวจหน่วยความจำ process ทั้งหมดที่ระบบคืน PID มา ยกเว้น process ของ Luna Guard เอง; PID ที่ Windows ปฏิเสธ, timeout และข้อผิดพลาดจะถูกรายงานและทำให้ผลเป็น “สแกนไม่ครบ”
-- การตรวจพบในหน่วยความจำเป็นการแจ้งเตือนเท่านั้น ไม่สั่งปิด process อัตโนมัติของ `analyze_data`
+- การตรวจพบในหน่วยความจำเป็นการแจ้งเตือนเท่านั้น ไม่สั่งปิด process อัตโนมัติ
 - finding ระบุสมาชิกและ container; สแกน+กำจัดจะไม่ย้าย archive อัตโนมัติ ผู้ใช้เลือกกักกันทั้ง archive ได้จากตารางผล
 
 ## 6. สแกน 5 ขั้น (`cmd_scan(args)`, args: `clean, full, paths, ask`)
@@ -92,7 +93,7 @@ poll `/api/state` ทุก 2 วิ และ `/api/log` ทุก 1 วิ; `e
 
 ## 9. การทดสอบ (`python -m unittest -v test_luna`) — 33 ข้อ
 แฮชตรง · YARA XWorm · ไม่แจ้งผิดไฟล์ปกติ · ชื่อเลียนระบบ · loader=MEDIUM ไม่ถูก clean · PowerShell history · C2 connection · โดเมนหลอกลวงใน DNS · อัปเดตจาก abuse.ch (mock) · clean ครบวงจร+กู้คืน · MEDIUM→ผู้ใช้กักกัน · allowlist+กัน path ผิด · LOW · log ความคืบหน้า+ข้าม cache · ปุ่มหยุด · ประวัติ scan และ last result หลัง restart พร้อมรายละเอียด · normalize ThreatFox object + hash · retry 502 · update ล้มเหลวไม่เลื่อนเวลา · ไม่มี pywebview ก็ไม่เปิด browser หรือ server · บันทึกภาษาไทย/อังกฤษ/จีนตัวย่อและตรวจ locale keys
-เพิ่มการทดสอบ nested archive + quarantine/restore, archive unpacked-size limit, Defender status/scan validation, ไฟล์ >50 MiB, YARA memory scanning ทุก PID ที่ enumerate ได้, permission denial และการเก็บสถานะ scan-incomplete; วิธี mock: ตั้ง env (`LOCALAPPDATA`, `APPDATA`, `WINDIR` …) **ก่อน import**; แทน `lg.run`, `lg.winreg` (FakeReg), `lg.http`
+เพิ่มการทดสอบ nested archive + quarantine/restore, การสแกนเกิน 1,000 สมาชิก, nested ZIP เกิน 2 ชั้น, expanded member 257 MiB พร้อม cleanup temp, disk-full ระหว่างเขียน temp ที่ต้องขึ้นสถานะ scan-incomplete, Defender status/scan validation, ไฟล์ >50 MiB, YARA memory scanning ทุก PID ที่ enumerate ได้, permission denial และการเก็บสถานะ scan-incomplete; วิธี mock: ตั้ง env (`LOCALAPPDATA`, `APPDATA`, `WINDIR` …) **ก่อน import**; แทน `lg.run`, `lg.winreg` (FakeReg), `lg.http`
 `PATH_RE` รองรับ path แบบ POSIX และ `user_writable`/`in_windows_dir` แปลง `/`→`\` เพื่อให้เทสต์บน Linux ได้
 
 ## 10. ข้อจำกัด / บั๊กที่เคยเจอ (สำคัญ)

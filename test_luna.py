@@ -1,4 +1,4 @@
-"""33 test cases ของ Luna Guard  (รัน: python -m unittest -v test_luna)
+"""36 test cases ของ Luna Guard  (รัน: python -m unittest -v test_luna)
 ส่วนที่เป็นคำสั่ง Windows (netstat/schtasks/ipconfig/registry) จำลองผลลัพธ์ด้วย mock - ไฟล์/แฮช/YARA/กักกัน/ฐานข้อมูลทดสอบจริง"""
 import argparse, contextlib, hashlib, io, json, os, struct, sys, tempfile, threading, unittest, zipfile
 from pathlib import Path
@@ -278,7 +278,9 @@ class T(unittest.TestCase):
         self.assertEqual(dashboard.get_language(), "en")
 
     def test25_logo_is_served_to_the_desktop_ui(self):
-        expected = (Path(__file__).resolve().parent / "logo" / "Luna_Guard.png").read_bytes()
+        logo_path = Path(__file__).resolve().parent / "logo" / "Luna_Guard.png"
+        expected = logo_path.read_bytes()
+        self.assertEqual(expected[25], 6, "logo PNG must include an alpha channel")
         server = dashboard.ThreadingHTTPServer(("127.0.0.1", 0), dashboard.H)
         thread = threading.Thread(target=server.serve_forever, daemon=True)
         thread.start()
@@ -287,6 +289,8 @@ class T(unittest.TestCase):
             with urlopen(page_url, timeout=5) as response:
                 page = response.read().decode("utf-8")
             self.assertIn('id="brandLogo"', page)
+            self.assertIn(".brand-logo{width:52px;height:52px", page)
+            self.assertIn('width="52" height="52"', page)
             self.assertIn("logo.src='/logo/Luna_Guard.png?t='+encodeURIComponent(T||'')", page)
             self.assertNotIn('src="/logo/Luna_Guard.png"', page)
             url = f"http://127.0.0.1:{server.server_address[1]}/logo/Luna_Guard.png?t={dashboard.TOKEN}"
@@ -316,18 +320,69 @@ class T(unittest.TestCase):
             lg.cmd_restore(argparse.Namespace(id=qid))
         self.assertTrue(outer_path.exists())
 
-    def test27_archive_scan_enforces_unpacked_size_limit(self):
-        archive_path = TMP / "oversized.zip"
+    def test27_archive_scans_more_than_one_thousand_members(self):
+        archive_path = TMP / "many-members.zip"
         with zipfile.ZipFile(archive_path, "w", zipfile.ZIP_DEFLATED) as archive:
-            archive.writestr("payload.ps1", b"A" * 128)
-        old_limit, lg.MAX_ARCHIVE_UNPACKED = lg.MAX_ARCHIVE_UNPACKED, 64
-        try:
+            for index in range(1001):
+                archive.writestr(f"item-{index}.txt", b"ordinary data")
+            archive.writestr("payload.exe", XW)
+        _, result = scan()
+        self.assertTrue(result["complete"])
+        self.assertTrue(any(
+            item["kind"] == "Archive member" and item["target"].endswith("payload.exe")
+            for item in result["findings"]
+        ))
+
+    def test34_archive_scans_nested_archives_beyond_two_levels(self):
+        content = io.BytesIO()
+        with zipfile.ZipFile(content, "w", zipfile.ZIP_DEFLATED) as archive:
+            archive.writestr("payload.exe", XW)
+        for _ in range(4):
+            nested = io.BytesIO()
+            with zipfile.ZipFile(nested, "w", zipfile.ZIP_DEFLATED) as archive:
+                archive.writestr("nested.zip", content.getvalue())
+            content = nested
+        archive_path = TMP / "deep-nesting.zip"
+        archive_path.write_bytes(content.getvalue())
+        _, result = scan()
+        finding = next(item for item in result["findings"] if item["kind"] == "Archive member")
+        self.assertTrue(result["complete"])
+        self.assertEqual(finding["sev"], "high")
+        self.assertGreaterEqual(finding["target"].count("nested.zip"), 4)
+
+    def test35_large_expanded_archive_member_is_streamed_and_cleaned_up(self):
+        archive_path = TMP / "large-expanded.zip"
+        zero_block = bytes(1024 * 1024)
+        with zipfile.ZipFile(archive_path, "w", zipfile.ZIP_DEFLATED) as archive:
+            with archive.open("large.ps1", "w") as member:
+                for _ in range(257):
+                    member.write(zero_block)
+
+        created = []
+        named_temporary_file = lg.tempfile.NamedTemporaryFile
+
+        def tracked_temporary_file(**kwargs):
+            kwargs["dir"] = TMP
+            temporary_file = named_temporary_file(**kwargs)
+            created.append(Path(temporary_file.name))
+            return temporary_file
+
+        with mock.patch.object(lg.tempfile, "NamedTemporaryFile", side_effect=tracked_temporary_file), \
+                mock.patch.object(lg, "yara_scan_file", return_value=[]):
+            _, result = scan()
+        self.assertTrue(result["complete"])
+        self.assertTrue(created)
+        self.assertTrue(all(not temporary_file.exists() for temporary_file in created))
+
+    def test36_archive_temp_storage_failure_marks_scan_incomplete(self):
+        archive_path = TMP / "temp-storage-failure.zip"
+        with zipfile.ZipFile(archive_path, "w", zipfile.ZIP_DEFLATED) as archive:
+            archive.writestr("payload.exe", XW)
+        with mock.patch.object(lg.tempfile, "NamedTemporaryFile", side_effect=OSError("disk full")):
             output, result = scan()
-        finally:
-            lg.MAX_ARCHIVE_UNPACKED = old_limit
-        self.assertFalse(any(item["kind"] == "Archive member" for item in result["findings"]))
-        self.assertIn("เกินงบข้อมูลคลายบีบอัด", output)
         self.assertFalse(result["complete"])
+        self.assertGreater(result["issues"], 0)
+        self.assertIn("disk full", output)
 
     def test28_defender_status_and_scan_commands_are_validated(self):
         completed = __import__("subprocess").CompletedProcess(
@@ -365,9 +420,14 @@ class T(unittest.TestCase):
             sizes.append((width or 256, height or 256))
             self.assertEqual((planes, bits), (1, 32))
             self.assertEqual(icon[offset:offset + 8], b"\x89PNG\r\n\x1a\n")
+            self.assertEqual(icon[offset + 25], 6, "ICO PNG frames must preserve transparency")
             self.assertLessEqual(offset + length, len(icon))
         self.assertEqual(sizes, [(256, 256), (128, 128), (64, 64), (48, 48), (32, 32), (16, 16)])
-        self.assertIn('--icon "logo\\Luna_Guard.ico"', (root / "build.bat").read_text(encoding="utf-8"))
+        build_script = (root / "build.bat").read_text(encoding="utf-8")
+        self.assertTrue(any(
+            "--icon" in line and "Luna_Guard.ico" in line
+            for line in build_script.splitlines()
+        ))
         self.assertIn('--icon "logo/Luna_Guard.ico"', (root / ".github" / "workflows" / "windows.yml").read_text(encoding="utf-8"))
 
     def test31_large_files_are_scanned_without_the_old_size_cap(self):
