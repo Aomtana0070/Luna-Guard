@@ -38,6 +38,12 @@ With Python installed, run `build.bat` from the project directory. It installs t
 
 The executable is not signed. Windows SmartScreen may show an unfamiliar-app warning.
 
+## Mobile app (Android and iOS)
+
+The Flutter source is in [mobile/](./mobile/). It scans only files the user selects, stores history and imported SHA-256 lists on-device, and does not upload file contents. The mobile scanner is a limited offline checker; it does not run the desktop YARA engine, inspect archive members or process memory, or scan other apps' private files.
+
+Android APK builds and unsigned iOS compilation run in the Mobile app GitHub Actions workflow. To build iOS for installation or distribution, use macOS with Xcode and configure Apple signing and provisioning.
+
 ## Threat-data sources and privacy
 
 Threat hashes and indicators are downloaded from [MalwareBazaar](https://bazaar.abuse.ch/), [ThreatFox](https://threatfox.abuse.ch/), and [URLhaus](https://urlhaus.abuse.ch/). YARA rules shipped with the app are maintained in this repository. Update requests contact those services; the app does not upload scanned files or scan history. An abuse.ch Auth-Key, if configured, is stored locally under `%LOCALAPPDATA%\LunaGuard`.

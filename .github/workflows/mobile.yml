@@ -1,0 +1,84 @@
+name: Mobile app
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "mobile/**"
+      - ".github/workflows/mobile.yml"
+  pull_request:
+    paths:
+      - "mobile/**"
+      - ".github/workflows/mobile.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  android:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+          cache-path: mobile
+      - name: Generate Android and iOS platform projects
+        run: |
+          flutter create --platforms=android,ios --org com.lunaguard --project-name luna_guard_mobile mobile/platform_scaffold
+          cp -R mobile/platform_scaffold/android mobile/android
+          cp -R mobile/platform_scaffold/ios mobile/ios
+          sed -i 's/android:label="luna_guard_mobile"/android:label="Luna Guard"/' mobile/android/app/src/main/AndroidManifest.xml
+          perl -0pi -e "s/# platform :ios, '[^']*'/platform :ios, '14.0'/" mobile/ios/Podfile
+          /usr/libexec/PlistBuddy -c "Set :CFBundleDisplayName Luna Guard" mobile/ios/Runner/Info.plist
+          rm -rf mobile/platform_scaffold
+      - name: Get dependencies
+        working-directory: mobile
+        run: flutter pub get
+      - name: Analyze Dart sources
+        working-directory: mobile
+        run: flutter analyze
+      - name: Run mobile scanner tests
+        working-directory: mobile
+        run: flutter test
+      - name: Build Android APK
+        working-directory: mobile
+        run: flutter build apk --release
+      - uses: actions/upload-artifact@v4
+        with:
+          name: LunaGuard-Android
+          path: mobile/build/app/outputs/flutter-apk/app-release.apk
+          if-no-files-found: error
+
+  ios:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+          cache-path: mobile
+      - name: Generate Android and iOS platform projects
+        run: |
+          flutter create --platforms=android,ios --org com.lunaguard --project-name luna_guard_mobile mobile/platform_scaffold
+          cp -R mobile/platform_scaffold/android mobile/android
+          cp -R mobile/platform_scaffold/ios mobile/ios
+          sed -i 's/android:label="luna_guard_mobile"/android:label="Luna Guard"/' mobile/android/app/src/main/AndroidManifest.xml
+          perl -0pi -e "s/# platform :ios, '[^']*'/platform :ios, '14.0'/" mobile/ios/Podfile
+          /usr/libexec/PlistBuddy -c "Set :CFBundleDisplayName Luna Guard" mobile/ios/Runner/Info.plist
+          rm -rf mobile/platform_scaffold
+      - name: Get dependencies
+        working-directory: mobile
+        run: flutter pub get
+      - name: Analyze Dart sources
+        working-directory: mobile
+        run: flutter analyze
+      - name: Run mobile scanner tests
+        working-directory: mobile
+        run: flutter test
+      - name: Compile unsigned iOS app
+        working-directory: mobile
+        run: flutter build ios --release --no-codesign
