@@ -38,7 +38,7 @@ void main() {
 
     expect(result.level, FindingLevel.clean);
     expect(result.complete, isFalse);
-    expect(result.reasons.join(' '), contains('Archive'));
+    expect(result.reasons, contains('reason.archiveUnsupported'));
   });
 
   test('matches hashes imported on this device', () async {
