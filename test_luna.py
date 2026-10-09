@@ -1,8 +1,9 @@
-"""24 test cases ของ Luna Guard  (รัน: python -m unittest -v test_luna)
+"""25 test cases ของ Luna Guard  (รัน: python -m unittest -v test_luna)
 ส่วนที่เป็นคำสั่ง Windows (netstat/schtasks/ipconfig/registry) จำลองผลลัพธ์ด้วย mock - ไฟล์/แฮช/YARA/กักกัน/ฐานข้อมูลทดสอบจริง"""
-import argparse, contextlib, hashlib, io, json, os, sys, tempfile, unittest
+import argparse, contextlib, hashlib, io, json, os, sys, tempfile, threading, unittest
 from pathlib import Path
 from unittest import mock
+from urllib.request import urlopen
 
 ROOT = Path(tempfile.mkdtemp(prefix="lg_"))
 os.environ.update(LOCALAPPDATA=str(ROOT / "local"), APPDATA=str(ROOT / "AppData"), TEMP=str(ROOT / "AppData/Temp"),
@@ -273,6 +274,21 @@ class T(unittest.TestCase):
         dashboard.LANGUAGE_FILE.write_text("{invalid json", encoding="utf-8")
         dashboard.set_language("en")
         self.assertEqual(dashboard.get_language(), "en")
+
+    def test25_logo_is_served_to_the_desktop_ui(self):
+        expected = (Path(__file__).resolve().parent / "logo" / "Luna_Guard.png").read_bytes()
+        server = dashboard.ThreadingHTTPServer(("127.0.0.1", 0), dashboard.H)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            url = f"http://127.0.0.1:{server.server_address[1]}/logo/Luna_Guard.png?t={dashboard.TOKEN}"
+            with urlopen(url, timeout=5) as response:
+                self.assertEqual(response.headers.get_content_type(), "image/png")
+                self.assertEqual(response.read(), expected)
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=5)
 
 
 if __name__ == "__main__":

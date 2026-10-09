@@ -4,7 +4,8 @@ rem สร้าง LunaGuard.exe (ดับเบิลคลิกไฟล์
 python -m pip install --upgrade pywebview yara-python pyinstaller
 if errorlevel 1 exit /b %errorlevel%
 python -m PyInstaller --clean --onefile --noconsole --uac-admin --name LunaGuard --collect-all webview ^
-  --add-data "dashboard.html;." --add-data "locales.json;." --add-data "luna_rules.yar;." luna_app.py
+  --add-data "dashboard.html;." --add-data "locales.json;." --add-data "logo\Luna_Guard.png;logo" ^
+  --add-data "luna_rules.yar;." luna_app.py
 if errorlevel 1 exit /b %errorlevel%
 echo.
 echo เสร็จแล้ว: dist\LunaGuard.exe

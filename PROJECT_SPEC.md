@@ -22,9 +22,10 @@
 | `luna_dashboard.py` | HTTP server ภายในเครื่อง + REST API + job runner + self-test; เปิด browser จากโหมด standalone เฉพาะเมื่อระบุ `--open-browser` |
 | `dashboard.html` | UI ไฟล์เดียว (HTML/CSS/JS ล้วน ไม่มี CDN) เรียก API ด้วย polling |
 | `locales.json` | ข้อความ UI และคู่มือภาษาไทย อังกฤษ และจีนตัวย่อ (รวมใน EXE) |
+| `logo\Luna_Guard.png` | โลโก้แอป แสดงในหน้าต่างและรวมใน EXE |
 | `luna_app.py` | แอปเดสก์ท็อป: เปิด server ในเครื่องแล้วแสดง UI ในหน้าต่าง **pywebview**; ถ้าไม่มี dependency แจ้ง error และไม่เปิด browser |
 | `luna_rules.yar` | กฎ YARA (severity: high/medium/low ใน `meta`) |
-| `build.bat` | PyInstaller → `dist\LunaGuard.exe` (`--uac-admin`, bundle html+locales+yar) |
+| `build.bat` | PyInstaller → `dist\LunaGuard.exe` (`--uac-admin`, bundle html+locales+logo+yar) |
 | `test_luna.py` | unittest (mock คำสั่ง Windows) |
 | `luna_gui.py` | **เลิกใช้** (tkinter รุ่นแรก) ลบได้ |
 

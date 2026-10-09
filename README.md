@@ -5,6 +5,7 @@ Luna Guard is a Windows desktop helper for scanning and quarantining suspicious 
 ## Features
 
 - Desktop window powered by pywebview; the local API binds only to `127.0.0.1` and checks a per-run token and Host header.
+- Luna Guard logo is shown in the app and bundled with the Windows executable.
 - Scan findings with severity and reasons, plus up to 100 detailed findings per scan in local history.
 - Reversible quarantine; HIGH findings are the only findings handled automatically by remediation. Review MEDIUM and LOW findings yourself.
 - Optional YARA scanning with the bundled Luna Guard rules and `yara-python`.

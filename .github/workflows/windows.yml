@@ -27,7 +27,7 @@ jobs:
       - name: Run tests
         run: python -m unittest -v test_luna
       - name: Build desktop executable
-        run: pyinstaller --clean --onefile --noconsole --uac-admin --name LunaGuard --collect-all webview --add-data "dashboard.html;." --add-data "locales.json;." --add-data "luna_rules.yar;." luna_app.py
+        run: pyinstaller --clean --onefile --noconsole --uac-admin --name LunaGuard --collect-all webview --add-data "dashboard.html;." --add-data "locales.json;." --add-data "logo/Luna_Guard.png;logo" --add-data "luna_rules.yar;." luna_app.py
       - name: Upload executable artifact
         uses: actions/upload-artifact@v4
         with:

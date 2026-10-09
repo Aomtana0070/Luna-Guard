@@ -138,6 +138,7 @@ class H(BaseHTTPRequestHandler):
         if not s.auth(): return s.out(403, {"error": "forbidden"})
         p = s.path.split("?")[0]
         if p == "/": return s.out(200, (BASE / "dashboard.html").read_bytes(), "text/html")
+        if p == "/logo/Luna_Guard.png": return s.out(200, (BASE / "logo" / "Luna_Guard.png").read_bytes(), "image/png")
         if p == "/api/locales": return s.out(200, json.loads((BASE / "locales.json").read_text(encoding="utf-8")))
         if p == "/api/state": return s.out(200, state())
         if p == "/api/log":
