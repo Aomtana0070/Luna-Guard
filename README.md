@@ -39,7 +39,7 @@ With Python installed, run `build.bat` from the project directory. It installs t
 
 The executable is not signed. Windows SmartScreen may show an unfamiliar-app warning.
 
-## Mobile app (Android and iOS) In dev (1.4.0) #not work will you can send feed back in discord
+## Mobile app (Android and iOS) — In development (1.4.2); if it does not work, please send feedback via Discord.
 
 
 The Flutter source is in [mobile/](./mobile/). It scans only files the user selects, stores history and imported SHA-256 lists on-device, and does not upload file contents. The mobile scanner is a limited offline checker; it does not run the desktop YARA engine, inspect archive members or process memory, or scan other apps' private files.
