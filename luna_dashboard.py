@@ -202,8 +202,21 @@ class H(BaseHTTPRequestHandler):
         d = json.loads(s.rfile.read(int(s.headers.get("Content-Length", 0))) or b"{}"); p = s.path.split("?")[0]; ok = True
         if p == "/api/update": ok = start("อัปเดตฐานข้อมูล", lg.cmd_update)
         elif p == "/api/scan":
-            a = type("A", (), {"clean": bool(d.get("clean")), "full": bool(d.get("full")), "paths": d.get("paths") or None})()
-            ok = start("สแกน+กำจัด" if a.clean else "สแกน", lambda: lg.cmd_scan(a))
+            files_only = bool(d.get("files_only"))
+            clean = bool(d.get("clean"))
+            full = bool(d.get("full"))
+            if files_only and clean:
+                return s.out(400, {"ok": False, "error": "file-only scans are read-only"})
+            if files_only and full:
+                return s.out(400, {"ok": False, "error": "choose either file-only or full-drive scan"})
+            if files_only and d.get("paths"):
+                return s.out(400, {"ok": False, "error": "file-only scan uses its predefined folders"})
+            a = type("A", (), {
+                "clean": clean, "files_only": files_only, "full": full,
+                "paths": d.get("paths") or None,
+            })()
+            name = "สแกนไฟล์แบบอัตโนมัติ" if files_only else "สแกน+กำจัด" if clean else "สแกน"
+            ok = start(name, lambda: lg.cmd_scan(a))
         elif p == "/api/selftest": ok = start("ทดสอบตัวเอง", selftest)
         elif p == "/api/defender-scan":
             scan_type = d.get("scan_type")

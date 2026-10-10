@@ -105,7 +105,7 @@ class FileScanner {
     var totalBytes = 0;
     var hasMscoreeMarker = false;
     var hasBsjbMarker = false;
-    var hasXworm = false;
+    final xwormIndicators = <String>{};
     var hasWeakXworm = false;
     var hasDownload = false;
     var hasBase64 = false;
@@ -127,8 +127,9 @@ class FileScanner {
           text.contains(latin1.decode(_toWideAscii(ascii.encode(value))));
       hasMscoreeMarker |= containsAscii('mscoree.dll');
       hasBsjbMarker |= containsAscii('bsjb');
-      hasXworm |= _wormSignatures
-          .any((marker) => containsAscii(marker) || containsWide(marker));
+      xwormIndicators.addAll(_wormSignatures.where(
+        (marker) => containsAscii(marker) || containsWide(marker),
+      ));
       hasWeakXworm |= containsAscii('xworm') || containsWide('xworm');
       hasDownload |= containsAscii(_powerShellDownload) ||
           containsWide(_powerShellDownload);
@@ -160,9 +161,12 @@ class FileScanner {
         prefix.length == 2 &&
         prefix[0] == 0x4d &&
         prefix[1] == 0x5a) {
-      if (hasDotnetMarker && hasXworm) {
+      if (hasDotnetMarker && xwormIndicators.length >= 2) {
         level = FindingLevel.high;
         reasons.add('reason.xwormHigh');
+      } else if (hasDotnetMarker && xwormIndicators.isNotEmpty) {
+        if (level != FindingLevel.high) level = FindingLevel.medium;
+        reasons.add('reason.xwormReview');
       } else if (totalBytes < 5 * 1024 * 1024 &&
           hasDotnetMarker &&
           hasWeakXworm &&

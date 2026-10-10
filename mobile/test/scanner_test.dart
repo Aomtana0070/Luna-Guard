@@ -22,12 +22,36 @@ void main() {
   test('detects XWorm-specific strings split across input chunks', () async {
     final content = Stream<List<int>>.fromIterable([
       [0x4d, 0x5a, ...ascii.encode('mscoree.dll BSJB <Xworm')],
-      ascii.encode('mm>'),
+      ascii.encode('mm> Xklog'),
     ]);
     final result = await FileScanner.scan(name: 'sample.exe', content: content);
 
     expect(result.level, FindingLevel.high);
     expect(result.reasons.single, 'reason.xwormHigh');
+  });
+
+  test('a single XWorm-specific marker needs manual review, not HIGH', () async {
+    final result = await FileScanner.scan(
+      name: 'vivoxsdk.dll',
+      content: Stream<List<int>>.value(
+        ascii.encode('MZ mscoree.dll BSJB <Xwormmm>'),
+      ),
+    );
+
+    expect(result.level, FindingLevel.medium);
+    expect(result.reasons, contains('reason.xwormReview'));
+  });
+
+  test('a generic XWorm string is not classified as HIGH', () async {
+    final result = await FileScanner.scan(
+      name: 'vivoxsdk.dll',
+      content: Stream<List<int>>.value(
+        ascii.encode('MZ mscoree.dll BSJB xworm'),
+      ),
+    );
+
+    expect(result.level, FindingLevel.medium);
+    expect(result.reasons, contains('reason.xwormReview'));
   });
 
   test('marks archives incomplete instead of reporting them clean', () async {

@@ -17,9 +17,10 @@ const _translations = <String, Map<String, String>>{
     'tagline': 'ตรวจไฟล์บนอุปกรณ์ของคุณ',
     'scanTitle': 'เลือกไฟล์ที่ต้องการตรวจ',
     'scanInfo':
-        'ตรวจไฟล์ที่คุณเลือกทีละไฟล์ด้วย SHA-256 และกฎตรวจจับแบบออฟไลน์ ข้อมูลไฟล์ไม่ถูกอัปโหลด',
+        'เลือกไฟล์ได้หลายไฟล์เพื่อตรวจต่อเนื่องด้วย SHA-256 และกฎออฟไลน์ ข้อมูลจะประมวลผลในเครื่องและไม่ถูกอัปโหลด',
     'pickFiles': 'เลือกไฟล์เพื่อสแกน',
     'scanning': 'กำลังตรวจไฟล์…',
+    'scanProgress': 'กำลังตรวจไฟล์ที่ {current} จาก {total}',
     'privacyTitle': 'ขอบเขตการทำงานบนมือถือ',
     'privacyInfo':
         'แอปตรวจเฉพาะไฟล์ที่คุณเลือก ไม่สามารถสแกนหน่วยความจำ แอปอื่น หรือทั้งเครื่องได้ ไฟล์บีบอัดจะระบุว่าสแกนไม่ครบ',
@@ -54,7 +55,8 @@ const _translations = <String, Map<String, String>>{
         'ผลไม่พบรูปแบบไม่ได้ยืนยันว่าไฟล์หรืออุปกรณ์ปลอดภัยทั้งหมด',
     'reason.hashMatch': 'SHA-256 ตรงกับรายการแฮชที่นำเข้าไว้ในอุปกรณ์',
     'reason.xwormHigh': 'พบสตริงเฉพาะของ XWorm และตัวบ่งชี้ .NET',
-    'reason.xwormReview': 'พบสตริงคล้าย XWorm และตัวบ่งชี้ .NET ควรตรวจสอบ',
+    'reason.xwormReview':
+        'พบสัญญาณ XWorm หรือคำทั่วไปเพียงบางส่วนร่วมกับตัวบ่งชี้ .NET ควรตรวจสอบเพิ่มเติม ไม่ใช่การยืนยันว่าติดเชื้อ',
     'reason.scriptLoader':
         'สคริปต์มีการดาวน์โหลด ถอดรหัส Base64 และสัญญาณการซ่อนตัว',
     'reason.defenderLoader':
@@ -74,9 +76,10 @@ const _translations = <String, Map<String, String>>{
     'tagline': 'On-device file checks',
     'scanTitle': 'Choose files to inspect',
     'scanInfo':
-        'Checks selected files with SHA-256 and offline signatures. File contents are never uploaded.',
+        'Select multiple files for sequential SHA-256 and offline signature checks. Files are processed on-device and never uploaded.',
     'pickFiles': 'Choose files',
     'scanning': 'Inspecting files…',
+    'scanProgress': 'Inspecting file {current} of {total}',
     'privacyTitle': 'Mobile scanning scope',
     'privacyInfo':
         'Only files you select are inspected. The app cannot scan memory, other apps, or the whole device. Archives are marked incomplete.',
@@ -110,9 +113,10 @@ const _translations = <String, Map<String, String>>{
     'threatNotice':
         'A result with no known pattern does not prove a file or device is safe.',
     'reason.hashMatch': 'SHA-256 matches a hash list imported on this device.',
-    'reason.xwormHigh': 'XWorm-specific strings and .NET markers found.',
+    'reason.xwormHigh':
+        'At least two distinct XWorm-specific strings and .NET markers found.',
     'reason.xwormReview':
-        'XWorm-like string and .NET markers found; review manually.',
+        'A partial or generic XWorm string and .NET markers were found; review manually. This does not confirm infection.',
     'reason.scriptLoader':
         'Script combines network download, Base64 decoding, and stealth indicators.',
     'reason.defenderLoader':
@@ -133,9 +137,10 @@ const _translations = <String, Map<String, String>>{
     'settings': '设置',
     'tagline': '本机文件检查',
     'scanTitle': '选择要检查的文件',
-    'scanInfo': '使用 SHA-256 和离线特征检查所选文件。文件内容不会上传。',
+    'scanInfo': '可选择多个文件，依次使用 SHA-256 和离线特征检查。文件仅在设备上处理，不会上传。',
     'pickFiles': '选择文件',
     'scanning': '正在检查文件…',
+    'scanProgress': '正在检查第 {current} 个文件，共 {total} 个',
     'privacyTitle': '手机扫描范围',
     'privacyInfo': '仅检查您选择的文件。应用无法扫描内存、其他应用或整台设备。压缩包会标记为扫描未完成。',
     'noThreats': '未发现已知特征',
@@ -164,8 +169,8 @@ const _translations = <String, Map<String, String>>{
     'clean': '未发现特征',
     'threatNotice': '未发现已知特征不代表文件或设备绝对安全。',
     'reason.hashMatch': 'SHA-256 与本机导入的哈希列表匹配。',
-    'reason.xwormHigh': '发现 XWorm 特征字符串和 .NET 标记。',
-    'reason.xwormReview': '发现类似 XWorm 的字符串和 .NET 标记，请人工检查。',
+    'reason.xwormHigh': '发现至少两个不同的 XWorm 特征字符串和 .NET 标记。',
+    'reason.xwormReview': '发现部分或通用 XWorm 字符串及 .NET 标记，请人工检查；这不能确认设备已感染。',
     'reason.scriptLoader': '脚本同时包含网络下载、Base64 解码和隐藏执行特征。',
     'reason.defenderLoader': '脚本同时包含 Defender 排除命令和加载器特征。',
     'reason.hiddenPolicy': '脚本隐藏窗口并绕过执行策略，请人工检查。',
@@ -191,6 +196,8 @@ class _LunaGuardMobileAppState extends State<LunaGuardMobileApp> {
   int _tab = 0;
   bool _ready = false;
   bool _scanning = false;
+  int _scanProgress = 0;
+  int _scanTotal = 0;
   String? _loadError;
 
   String tr(String key, [Map<String, String> values = const {}]) {
@@ -248,10 +255,16 @@ class _LunaGuardMobileAppState extends State<LunaGuardMobileApp> {
       if (files.isEmpty || !mounted) return;
       setState(() {
         _scanning = true;
+        _scanProgress = 0;
+        _scanTotal = files.length;
         _lastResults = [];
       });
       final results = <FileScanResult>[];
-      for (final file in files) {
+      for (var index = 0; index < files.length; index++) {
+        final file = files[index];
+        if (mounted) {
+          setState(() => _scanProgress = index + 1);
+        }
         try {
           final result = await FileScanner.scan(
             name: file.name,
@@ -266,7 +279,7 @@ class _LunaGuardMobileAppState extends State<LunaGuardMobileApp> {
             bytes: 0,
             scannedAt: DateTime.now(),
             level: FindingLevel.clean,
-            reasons: ['Scan failed: $error'],
+            reasons: [tr('scanError', {'error': error.toString()})],
             complete: false,
           ));
         }
@@ -276,11 +289,17 @@ class _LunaGuardMobileAppState extends State<LunaGuardMobileApp> {
         _lastResults = results;
         _history.insertAll(0, results);
         _scanning = false;
+        _scanProgress = 0;
+        _scanTotal = 0;
       });
       await _saveHistory();
     } catch (error) {
       if (!mounted) return;
-      setState(() => _scanning = false);
+      setState(() {
+        _scanning = false;
+        _scanProgress = 0;
+        _scanTotal = 0;
+      });
       _message(tr('scanError', {'error': error.toString()}));
     }
   }
@@ -439,15 +458,32 @@ class _LunaGuardMobileAppState extends State<LunaGuardMobileApp> {
             icon: Icons.shield_moon_outlined,
             title: tr('scanTitle'),
             body: tr('scanInfo'),
-            child: FilledButton.icon(
-              onPressed: _scanning ? null : _selectAndScan,
-              icon: _scanning
-                  ? const SizedBox(
-                      width: 18,
-                      height: 18,
-                      child: CircularProgressIndicator(strokeWidth: 2))
-                  : const Icon(Icons.folder_open),
-              label: Text(_scanning ? tr('scanning') : tr('pickFiles')),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                FilledButton.icon(
+                  onPressed: _scanning ? null : _selectAndScan,
+                  icon: _scanning
+                      ? const SizedBox(
+                          width: 18,
+                          height: 18,
+                          child: CircularProgressIndicator(strokeWidth: 2))
+                      : const Icon(Icons.folder_open),
+                  label: Text(_scanning ? tr('scanning') : tr('pickFiles')),
+                ),
+                if (_scanning) ...[
+                  const SizedBox(height: 12),
+                  LinearProgressIndicator(
+                    value:
+                        _scanTotal == 0 ? null : _scanProgress / _scanTotal,
+                  ),
+                  const SizedBox(height: 8),
+                  Text(tr('scanProgress', {
+                    'current': '$_scanProgress',
+                    'total': '$_scanTotal',
+                  })),
+                ],
+              ],
             ),
           ),
           const SizedBox(height: 12),

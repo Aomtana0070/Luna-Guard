@@ -53,11 +53,11 @@
 4. อยู่ใน `allow` ⇒ ไม่แจ้ง
 5. ไม่ใช่ `SCRIPT_EXT` ⇒ จบ
 6. สแกน YARA (`yara_scan`) — severity จาก `meta.severity` (ค่าเริ่มต้น high)
-7. Heuristic (เฉพาะ PE): สตริง XWorm (`xworm`, `<xwormmm>`, `xklog` ทั้ง ASCII/UTF-16) **+5**; ชื่อเลียนไฟล์ระบบ (`csrss.exe`, `svchost.exe` …) นอก `%WINDIR%` **+3**; ถ้ามีคะแนนแล้ว: .NET (`mscoree.dll`+`BSJB`) **+1**, อยู่ใน Temp/AppData/ProgramData/Public/Downloads **+1**
-8. ผลรวม: YARA high หรือคะแนน ≥5 ⇒ **high**; YARA medium หรือ ≥3 ⇒ **medium**; YARA low ⇒ **low**
+7. Heuristic (เฉพาะ PE): ตัวบ่งชี้เฉพาะ XWorm (`<xwormmm>`, `XWorm V`, `xklog` ทั้ง ASCII/UTF-16) **+3**; คำทั่วไป `xworm` **+2**; ชื่อเลียนไฟล์ระบบนอก `%WINDIR%` **+3**; เมื่อมีสัญญาณแล้ว .NET (`mscoree.dll`+`BSJB`) และตำแหน่งที่ผู้ใช้เขียนได้เพิ่มอย่างละ **+1**
+8. ผลรวม: YARA high หรือคะแนน ≥5 ที่มีตัวบ่งชี้เฉพาะ XWorm ⇒ **high**; YARA medium หรือคะแนน ≥3 ⇒ **medium**; YARA low ⇒ **low**. กฎ `LunaGuard_XWorm_Strong` ต้องพบตัวบ่งชี้เฉพาะอย่างน้อย 2 รายการ; คำทั่วไปเพียงตัวเดียวไม่พอให้เป็น HIGH
 
 การเดินไฟล์ (`walk_files`) ข้าม: `%WINDIR%`, โฟลเดอร์ Windows Defender, `LunaGuard`, และชื่อโฟลเดอร์ใน `SKIP_DIRS` (cache, gpucache, node_modules, .git, `$recycle.bin` …)
-โฟลเดอร์ค่าเริ่มต้น: `%TEMP%`, `%APPDATA%`, `%LOCALAPPDATA%`, `%PROGRAMDATA%`, `C:\Users\Public`, `Downloads`, โฟลเดอร์ Startup
+โฟลเดอร์สแกนอัตโนมัติ: `%TEMP%`, `%APPDATA%`, `Downloads`, โฟลเดอร์ Startup; ตัดโฟลเดอร์ย่อยที่ซ้ำออก และไม่เดิน `%LOCALAPPDATA%` ทั้งหมดหรือ `%PROGRAMDATA%` เพื่อให้ขอบเขตแคบและลดเวลาสแกน
 
 ### การตรวจ archive และหน่วยความจำ
 - ตรวจ `.zip`, `.jar`, `.docx/.docm`, `.xlsx/.xlsm`, `.pptx/.pptm`, `.apk` โดย stream สมาชิกเป้าหมายผ่านไฟล์ชั่วคราวบน disk; ไม่มีเพดานในแอปสำหรับจำนวนสมาชิก, ข้อมูลคลายบีบอัดรวม, ความลึก nested archive หรือขนาดไฟล์ปกติ
@@ -67,20 +67,22 @@
 - การตรวจพบในหน่วยความจำเป็นการแจ้งเตือนเท่านั้น ไม่สั่งปิด process อัตโนมัติ
 - finding ระบุสมาชิกและ container; สแกน+กำจัดจะไม่ย้าย archive อัตโนมัติ ผู้ใช้เลือกกักกันทั้ง archive ได้จากตารางผล
 
-## 6. สแกน 5 ขั้น (`cmd_scan(args)`, args: `clean, full, paths, ask`)
+## 6. สแกน (`cmd_scan(args)`, args: `clean, full, files_only, paths, ask`)
+ปุ่ม **สแกนไฟล์อัตโนมัติ** และ `scan --files-only` ตรวจเฉพาะโฟลเดอร์อัตโนมัติด้านบน (รวมการตรวจสมาชิก archive ที่รองรับ), ไม่แก้ไขไฟล์ และข้าม process/หน่วยความจำ, startup entries, network/DNS และ PowerShell history; ไม่รับ `--clean`, `--full` หรือ `--paths` ร่วมกัน
+โหมดสแกนด่วนเดิมตรวจไฟล์และทำอีกสี่ขั้นตอนต่อไปนี้ ส่วน `--full` ตรวจไฟล์ใต้ไดรฟ์ C: ก่อนทำขั้นตอนระบบ
 1. **ไฟล์** — log `▶ เริ่ม / … ตรวจแล้ว N ไฟล์ (ทุก 3 วิ) / ✔ จบ`; สแกนไฟล์รองรับทุกขนาดด้วย streaming hash และ YARA path scan; อัปเดต `PROGRESS`; หยุดได้ด้วย `STOP["flag"]`
 2. **โปรเซส/หน่วยความจำ** — `Get-CimInstance Win32_Process` (PowerShell); ตรวจ executable ที่เข้าถึงได้และรัน YARA `match(pid=...)` กับ process ทุกตัวที่ enumerate ได้ (ยกเว้นตัวแอปเอง); การปฏิเสธ/timeout ถือว่าสแกนไม่ครบ
 3. **จุดฝังตัว** — Registry Run/RunOnce (HKCU/HKLM), Scheduled Tasks (`schtasks /query /fo csv /v`); ชี้ไป high ⇒ high, ชี้ไป path เขียนได้ ⇒ medium
 4. **เครือข่าย/DNS** — `netstat -ano -p tcp` เทียบ IP C2 ⇒ high; `ipconfig /displaydns` + `hosts` เทียบโดเมน ⇒ medium
 5. **PowerShell history** (`ConsoleHost_history.txt`) — pattern IEX/DownloadString/-enc/FromBase64String/mshta http/CAPTCHA ปลอม/ปิด Defender ⇒ medium
-ผลเก็บใน `LAST_SCAN` (`time, files, clean, complete, issues, audit, findings[{sev,kind,target,why}]`) + `history.json` (30 สแกนล่าสุดพร้อมจำนวน HIGH/MEDIUM/LOW, ความครบถ้วน, audit และรายละเอียดสูงสุด 100 รายการต่อครั้ง; บันทึกแบบ atomic) หากมีไฟล์/สมาชิก archive/process เข้าถึงไม่ได้, YARA timeout/ผิดพลาด, ข้ามเพราะข้อจำกัด archive หรือหยุดสแกน UI ต้องแสดง “สแกนไม่ครบ”; หากครบและไม่พบ ให้แสดงเพียง “ไม่พบภัยคุกคามในขอบเขตที่ตรวจ” ไม่รับประกันว่าเครื่องปลอดภัยทั้งหมด
+ผลเก็บใน `LAST_SCAN` (`time, files, clean, scope, complete, issues, audit, findings[{sev,kind,target,why}]`) + `history.json` (30 สแกนล่าสุดพร้อมขอบเขตสแกน, จำนวน HIGH/MEDIUM/LOW, ความครบถ้วน, audit และรายละเอียดสูงสุด 100 รายการต่อครั้ง; บันทึกแบบ atomic) หากมีไฟล์/สมาชิก archive/process เข้าถึงไม่ได้, YARA timeout/ผิดพลาด, ข้ามเพราะข้อจำกัด archive หรือหยุดสแกน UI ต้องแสดง “สแกนไม่ครบ”; หากครบและไม่พบ ให้แสดงเพียง “ไม่พบภัยคุกคามในขอบเขตที่ตรวจ” ไม่รับประกันว่าเครื่องปลอดภัยทั้งหมด
 `--clean` ทำ: `taskkill` โปรเซส → ลบค่า Registry Run → `schtasks /delete` → quarantine ไฟล์ (เฉพาะ high)
 CLI: `update | scan [--clean] [--full] [--ask] [--paths ..] | quarantine | restore <id> | add-hash <sha256> | schedule`
 
 ## 7. REST API (`luna_dashboard.py`)
 ทุก request ต้องมี token (`?t=` หรือ header `X-T`) และ `Host` เป็น `127.0.0.1`/`localhost` ไม่งั้น 403
 - `GET /` → dashboard.html; `GET /api/state`; `GET /api/log?since=N`
-- `POST /api/update | /api/scan {clean,full,paths} | /api/defender-scan {scan_type: quick|full} | /api/selftest | /api/restore {id} | /api/key {key} | /api/remove {path} | /api/allow {path} | /api/stop | /api/elevate`
+- `POST /api/update | /api/scan {clean,full,files_only,paths} | /api/defender-scan {scan_type: quick|full} | /api/selftest | /api/restore {id} | /api/key {key} | /api/remove {path} | /api/allow {path} | /api/stop | /api/elevate`
 - งานยาวรันเป็น thread เดียว (`S["job"]`); ซ้อนงานได้ 409; stdout ของงานถูกจับเข้า `S["log"]` (ระดับสีจากคำนำหน้า `[HIGH`, `[MEDIUM`, `[+]`, `[!]`, `[PASS`, `[FAIL`)
 - `/api/state`: `hashes, iocs, updated, key, yara, admin, defender, job, hist, last, quar, self, prog, n`; Defender status มาจาก `Get-MpComputerStatus` และ cache 30 วินาที; scan request ใช้ `Start-MpScan` บน Windows
 - งาน Defender ถูกส่งผ่าน job runner; Luna Guard แสดงสถานะที่ Windows รายงานและไม่ได้แทนที่หรือควบคุมการตั้งค่า Defender real-time
@@ -91,9 +93,9 @@ CLI: `update | scan [--clean] [--full] [--ask] [--paths ..] | quarantine | resto
 poll `/api/state` ทุก 2 วิ และ `/api/log` ทุก 1 วิ; `esc()` escape ข้อความ; path ในปุ่มใช้ `encodeURIComponent` ใน `data-p`
 คะแนน = 100 − 30×HIGH − 5×(MEDIUM+LOW)
 
-## 9. การทดสอบ (`python -m unittest -v test_luna`) — 33 ข้อ
+## 9. การทดสอบ (`python -m unittest -v test_luna`) — 41 ข้อ
 แฮชตรง · YARA XWorm · ไม่แจ้งผิดไฟล์ปกติ · ชื่อเลียนระบบ · loader=MEDIUM ไม่ถูก clean · PowerShell history · C2 connection · โดเมนหลอกลวงใน DNS · อัปเดตจาก abuse.ch (mock) · clean ครบวงจร+กู้คืน · MEDIUM→ผู้ใช้กักกัน · allowlist+กัน path ผิด · LOW · log ความคืบหน้า+ข้าม cache · ปุ่มหยุด · ประวัติ scan และ last result หลัง restart พร้อมรายละเอียด · normalize ThreatFox object + hash · retry 502 · update ล้มเหลวไม่เลื่อนเวลา · ไม่มี pywebview ก็ไม่เปิด browser หรือ server · บันทึกภาษาไทย/อังกฤษ/จีนตัวย่อและตรวจ locale keys
-เพิ่มการทดสอบ nested archive + quarantine/restore, การสแกนเกิน 1,000 สมาชิก, nested ZIP เกิน 2 ชั้น, expanded member 257 MiB พร้อม cleanup temp, disk-full ระหว่างเขียน temp ที่ต้องขึ้นสถานะ scan-incomplete, Defender status/scan validation, ไฟล์ >50 MiB, YARA memory scanning ทุก PID ที่ enumerate ได้, permission denial และการเก็บสถานะ scan-incomplete; วิธี mock: ตั้ง env (`LOCALAPPDATA`, `APPDATA`, `WINDIR` …) **ก่อน import**; แทน `lg.run`, `lg.winreg` (FakeReg), `lg.http`
+เพิ่มการทดสอบ nested archive + quarantine/restore, การสแกนเกิน 1,000 สมาชิก, nested ZIP เกิน 2 ชั้น, expanded member 257 MiB พร้อม cleanup temp, disk-full ระหว่างเขียน temp ที่ต้องขึ้นสถานะ scan-incomplete, Defender status/scan validation, ไฟล์ >50 MiB, YARA memory scanning ทุก PID ที่ enumerate ได้, permission denial, การเก็บสถานะ scan-incomplete, ขอบเขต/API สแกนอัตโนมัติ และการลด false positive ของ XWorm; วิธี mock: ตั้ง env (`LOCALAPPDATA`, `APPDATA`, `WINDIR` …) **ก่อน import**; แทน `lg.run`, `lg.winreg` (FakeReg), `lg.http`
 `PATH_RE` รองรับ path แบบ POSIX และ `user_writable`/`in_windows_dir` แปลง `/`→`\` เพื่อให้เทสต์บน Linux ได้
 
 ## 10. ข้อจำกัด / บั๊กที่เคยเจอ (สำคัญ)

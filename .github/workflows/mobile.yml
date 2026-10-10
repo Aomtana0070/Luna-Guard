@@ -3,6 +3,7 @@ name: Mobile app
 on:
   push:
     branches: [main]
+    tags: ["v*"]
     paths:
       - "mobile/**"
       - ".github/workflows/mobile.yml"
@@ -13,7 +14,7 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
   android:
@@ -42,11 +43,61 @@ jobs:
       - name: Build Android APK
         working-directory: mobile
         run: flutter build apk --release
+      - name: Prepare release APK
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: cp mobile/build/app/outputs/flutter-apk/app-release.apk LunaGuard-Android.apk
       - uses: actions/upload-artifact@v4
         with:
           name: LunaGuard-Android
           path: mobile/build/app/outputs/flutter-apk/app-release.apk
           if-no-files-found: error
+      - uses: actions/upload-artifact@v4
+        if: startsWith(github.ref, 'refs/tags/v')
+        with:
+          name: LunaGuard-Android-Release
+          path: LunaGuard-Android.apk
+          if-no-files-found: error
+
+  desktop:
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install dependencies
+        run: python -m pip install --upgrade pip pywebview yara-python pyinstaller
+      - name: Run desktop tests
+        run: python -m unittest -v test_luna
+      - name: Build Windows executable
+        run: pyinstaller --clean --onefile --noconsole --uac-admin --icon "logo/Luna_Guard.ico" --name LunaGuard --collect-all webview --add-data "dashboard.html;." --add-data "locales.json;." --add-data "logo/Luna_Guard.png;logo" --add-data "luna_rules.yar;." luna_app.py
+      - uses: actions/upload-artifact@v4
+        with:
+          name: LunaGuard-Windows
+          path: dist/LunaGuard.exe
+          if-no-files-found: error
+
+  publish-release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [android, desktop]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: LunaGuard-Android-Release
+          path: release-assets
+      - uses: actions/download-artifact@v4
+        with:
+          name: LunaGuard-Windows
+          path: release-assets
+      - name: Publish mobile and desktop assets
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            release-assets/LunaGuard-Android.apk
+            release-assets/LunaGuard.exe
+          generate_release_notes: true
 
   ios:
     runs-on: macos-latest

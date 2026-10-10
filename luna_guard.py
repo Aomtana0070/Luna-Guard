@@ -59,9 +59,10 @@ SYSTEM_NAMES = {
     "csrss.exe", "svchost.exe", "lsass.exe", "winlogon.exe", "explorer.exe",
     "services.exe", "smss.exe", "taskhost.exe", "taskhostw.exe", "conhost.exe",
     "wininit.exe", "spoolsv.exe", "dllhost.exe", "runtimebroker.exe",
-    "searchindexer.exe", "wmpnscfg.exe", "ctfmon.exe", "sipnotify.exe",
+    "searchindexer.exe", "ctfmon.exe", "sipnotify.exe",
 }
-STRONG_PATTERNS = [rb"xworm", rb"<xwormmm>", rb"xklog"]
+STRONG_PATTERNS = [rb"<xwormmm>", rb"xworm v", rb"xklog"]
+WEAK_PATTERNS = [rb"xworm"]
 PS_PATTERNS = [
     (r"downloadstring|downloadfile|invoke-webrequest|iwr\s|curl\s.*http", "ดาวน์โหลดจากเน็ตผ่าน PowerShell"),
     (r"\biex\b|invoke-expression", "รันโค้ดที่ดึงมา (IEX)"),
@@ -362,7 +363,7 @@ def in_windows_dir(p):
     return p.lower().replace("/", "\\").startswith(win.replace("/", "\\") + "\\")
 
 
-def classify_analysis(path, sha, con, matches, is_pe, strong_xworm, dotnet):
+def classify_analysis(path, sha, con, matches, is_pe, strong_xworm, weak_xworm, dotnet):
     row = con.execute("SELECT family FROM hashes WHERE sha256=?", (sha,)).fetchone()
     if row:
         return "high", [f"แฮชตรงกับมัลแวร์ที่รู้จัก ({row[0]})"], sha
@@ -371,14 +372,24 @@ def classify_analysis(path, sha, con, matches, is_pe, strong_xworm, dotnet):
     ext = Path(path).suffix.lower()
     if ext not in SCRIPT_EXT:
         return None, [], sha
-    ywhy = [f"YARA: {m['rule']}" for m in matches]
+    ywhy = [
+        f"YARA: {m['rule']} — พบรูปแบบ XWorm หลายตัวบ่งชี้"
+        if m["rule"] == "LunaGuard_XWorm_Strong"
+        else f"YARA: {m['rule']} — พบคำว่า XWorm ร่วมกับตัวบ่งชี้ .NET (ยังไม่ยืนยันว่าเป็นมัลแวร์)"
+        if m["rule"] == "LunaGuard_XWorm_Weak"
+        else f"YARA: {m['rule']}"
+        for m in matches
+    ]
     rk = {"high": 3, "medium": 2, "low": 1}
     ysev = max((m["severity"] for m in matches), key=lambda x: rk.get(x, 3), default=None)
     score, why = 0, []
     if is_pe:
         if strong_xworm:
-            score += 5
-            why.append("พบสตริงเฉพาะของ XWorm")
+            score += 3
+            why.append("พบรูปแบบสตริงที่สัมพันธ์กับ XWorm (ควรตรวจยืนยัน)")
+        elif weak_xworm:
+            score += 2
+            why.append("พบข้อความที่อาจเกี่ยวข้องกับ XWorm (ยังไม่ยืนยันว่าเป็นมัลแวร์)")
         if Path(path).name.lower() in SYSTEM_NAMES and not in_windows_dir(path):
             score += 3
             why.append("ชื่อเลียนแบบไฟล์ระบบแต่อยู่นอกโฟลเดอร์ Windows")
@@ -389,7 +400,7 @@ def classify_analysis(path, sha, con, matches, is_pe, strong_xworm, dotnet):
             if user_writable(path):
                 score += 1
                 why.append("อยู่ในโฟลเดอร์ที่ผู้ใช้เขียนได้ (Temp/AppData)")
-    if ysev == "high" or score >= 5:
+    if ysev == "high" or (strong_xworm and score >= 5):
         return "high", ywhy + why, sha
     if ysev == "medium" or score >= 3:
         return "medium", ywhy + why, sha
@@ -401,7 +412,17 @@ def classify_analysis(path, sha, con, matches, is_pe, strong_xworm, dotnet):
 def inspect_file_stream(path):
     """Hash arbitrary-size files and collect only the small heuristic markers in one pass."""
     digest = hashlib.sha256()
-    patterns = [pattern.lower() for pat in STRONG_PATTERNS for pattern in (pat, pat.decode().encode("utf-16le"))]
+    strong_patterns = [
+        pattern.lower()
+        for pat in STRONG_PATTERNS
+        for pattern in (pat, pat.decode().encode("utf-16le"))
+    ]
+    weak_patterns = [
+        pattern.lower()
+        for pat in WEAK_PATTERNS
+        for pattern in (pat, pat.decode().encode("utf-16le"))
+    ]
+    patterns = strong_patterns + weak_patterns
     patterns.extend((b"mscoree.dll", b"bsjb"))
     longest = max(map(len, patterns))
     carry = b""
@@ -417,8 +438,15 @@ def inspect_file_stream(path):
                 if index not in found and pattern in data:
                     found.add(index)
             carry = data[-(longest - 1):]
-    return digest.hexdigest(), prefix, any(i < len(patterns) - 2 for i in found), \
-        len(patterns) - 2 in found and len(patterns) - 1 in found
+    strong_count = len(strong_patterns)
+    dotnet_start = len(patterns) - 2
+    return (
+        digest.hexdigest(),
+        prefix,
+        any(i < strong_count for i in found),
+        any(strong_count <= i < dotnet_start for i in found),
+        dotnet_start in found and dotnet_start + 1 in found,
+    )
 
 
 def analyze(path, con, logical_path=None):
@@ -432,7 +460,7 @@ def analyze(path, con, logical_path=None):
             prefix = fh.read(2)
         if Path(display_path).suffix.lower() not in SCRIPT_EXT and prefix != b"MZ":
             return None, [], ""
-        sha, prefix, strong_xworm, dotnet = inspect_file_stream(path)
+        sha, prefix, strong_xworm, weak_xworm, dotnet = inspect_file_stream(path)
     except OSError as e:
         scan_issue(f"อ่านไฟล์ไม่สำเร็จ {display_path}: {e}")
         return None, [], ""
@@ -445,7 +473,7 @@ def analyze(path, con, logical_path=None):
     return classify_analysis(
         display_path, sha, con,
         yara_scan_file(path) if Path(display_path).suffix.lower() in SCRIPT_EXT else [],
-        is_pe, strong_xworm, dotnet,
+        is_pe, strong_xworm, weak_xworm, dotnet,
     )
 
 
@@ -567,10 +595,32 @@ def run(cmd):
 
 def default_scan_dirs():
     e = os.environ.get
-    dirs = [e("TEMP"), e("APPDATA"), e("LOCALAPPDATA"), e("PROGRAMDATA"),
-            r"C:\Users\Public", str(Path.home() / "Downloads"),
-            str(Path(e("APPDATA", "")) / r"Microsoft\Windows\Start Menu\Programs\Startup")]
-    return [d for d in dict.fromkeys(dirs) if d and os.path.isdir(d)]
+    appdata = e("APPDATA")
+    candidates = [
+        e("TEMP"),
+        appdata,
+        str(Path.home() / "Downloads"),
+        str(Path(appdata) / r"Microsoft\Windows\Start Menu\Programs\Startup") if appdata else None,
+    ]
+    dirs = list(dict.fromkeys(os.path.abspath(d) for d in candidates if d and os.path.isdir(d)))
+    normalized = {directory: os.path.normcase(directory) for directory in dirs}
+    roots = []
+    for directory in dirs:
+        current = normalized[directory]
+        nested = False
+        for other in dirs:
+            if other == directory:
+                continue
+            parent = normalized[other]
+            try:
+                if os.path.commonpath((parent, current)) == parent:
+                    nested = True
+                    break
+            except ValueError:
+                continue
+        if not nested:
+            roots.append(directory)
+    return roots
 
 
 def walk_files(roots):
@@ -773,6 +823,14 @@ def cmd_restore(args):
 def cmd_scan(args):
     if not IS_WIN:
         print("[!] เครื่องมือนี้ออกแบบสำหรับ Windows - บางส่วนจะข้ามไป")
+    files_only = bool(getattr(args, "files_only", False))
+    clean = bool(args.clean)
+    if files_only and clean:
+        raise SystemExit("โหมดสแกนไฟล์อัตโนมัติเป็นแบบดูอย่างเดียว; เลือกกักกันเองจากผลสแกน")
+    if files_only and getattr(args, "full", False):
+        raise SystemExit("เลือกได้เพียงโหมดสแกนไฟล์อัตโนมัติหรือสแกนทั้งไดรฟ์")
+    if files_only and getattr(args, "paths", None):
+        raise SystemExit("โหมดสแกนไฟล์อัตโนมัติใช้เฉพาะโฟลเดอร์ที่กำหนดไว้")
     SCAN_AUDIT.clear()
     SCAN_AUDIT.update(issues=0, details=[], memory={"attempted": 0, "scanned": 0, "denied": 0, "failed": 0})
     if not IS_WIN:
@@ -784,10 +842,13 @@ def cmd_scan(args):
     print("YARA:", "เปิดใช้งาน" if yara_available else "ไม่ได้ใช้ (pip install yara-python เพื่อเปิด)")
     if not yara_available:
         scan_issue("ไม่มี YARA rules หรือ yara-python; ข้ามการตรวจด้วยกฎและหน่วยความจำ")
-    roots = [r"C:\\"] if args.full else (args.paths or default_scan_dirs())
+    roots = [r"C:\\"] if args.full else (
+        default_scan_dirs() if files_only else (args.paths or default_scan_dirs())
+    )
     high_files, findings, archive_findings = {}, [], []
 
-    print(f"[1/5] สแกนไฟล์ ({len(roots)} โฟลเดอร์)...")
+    stage_count = 1 if files_only else 5
+    print(f"[1/{stage_count}] สแกนไฟล์ ({len(roots)} โฟลเดอร์)...")
     count, t0, STOP["flag"] = 0, time.time(), False
     for i, root in enumerate(roots, 1):
         rt, rc, last = time.time(), 0, time.time()
@@ -797,7 +858,7 @@ def cmd_scan(args):
                 break
             count += 1
             rc += 1
-            PROGRESS.update(stage=f"[1/5] สแกนไฟล์ ({i}/{len(roots)})", files=count, path=f)
+            PROGRESS.update(stage=f"[1/{stage_count}] สแกนไฟล์ ({i}/{len(roots)})", files=count, path=f)
             if time.time() - last >= 3:
                 last = time.time()
                 print(f"        … ตรวจแล้ว {count:,} ไฟล์ ({int(last - t0)} วิ) ตอนนี้: …{f[-80:]}")
@@ -814,52 +875,54 @@ def cmd_scan(args):
             break
     print(f"      รวมตรวจ {count:,} ไฟล์ ใช้ {int(time.time() - t0)} วิ")
 
-    PROGRESS.update(stage="[2/5] ตรวจโปรเซสที่รันอยู่", path="")
-    print("[2/5] ตรวจโปรเซสที่รันอยู่...")
-    bad_pids = {}
-    processes = list_processes()
-    for p in processes:
-        exe = p.get("ExecutablePath") or ""
-        if exe and (exe in high_files or analyze(exe, con)[0] == "high"):
-            bad_pids[p["ProcessId"]] = exe
-            findings.append(("high", "โปรเซส", f"PID {p['ProcessId']} {exe}", ["รันไฟล์ที่เป็นอันตราย"]))
-    for memory_finding in scan_process_memory(processes):
-        findings.append((
-            memory_finding["sev"], memory_finding["kind"], memory_finding["target"],
-            [memory_finding["why"]],
-        ))
+    bad_pids, bad_reg, bad_tasks = {}, [], []
+    if files_only:
+        print("[+] โหมดสแกนไฟล์อัตโนมัติ: ข้ามการตรวจ process, memory, startup entries, network และ PowerShell")
+    else:
+        PROGRESS.update(stage="[2/5] ตรวจโปรเซสที่รันอยู่", path="")
+        print("[2/5] ตรวจโปรเซสที่รันอยู่...")
+        processes = list_processes()
+        for p in processes:
+            exe = p.get("ExecutablePath") or ""
+            if exe and (exe in high_files or analyze(exe, con)[0] == "high"):
+                bad_pids[p["ProcessId"]] = exe
+                findings.append(("high", "โปรเซส", f"PID {p['ProcessId']} {exe}", ["รันไฟล์ที่เป็นอันตราย"]))
+        for memory_finding in scan_process_memory(processes):
+            findings.append((
+                memory_finding["sev"], memory_finding["kind"], memory_finding["target"],
+                [memory_finding["why"]],
+            ))
 
-    PROGRESS.update(stage="[3/5] ตรวจจุดฝังตัว", path="")
-    print("[3/5] ตรวจจุดฝังตัว (Registry / Scheduled Task)...")
-    bad_reg, bad_tasks = [], []
-    for hive, sub, label, name, val in registry_run_entries():
-        p = extract_path(val)
-        if p and (p in high_files or (os.path.isfile(p) and analyze(p, con)[0] == "high")):
-            bad_reg.append((hive, sub, name))
-            findings.append(("high", "Registry Run", f"{label}\\{sub}\\{name} -> {p}", ["ชี้ไปยังมัลแวร์"]))
-            if os.path.isfile(p) and p not in high_files:
-                high_files[p] = (sha256_of(p), ["ถูกอ้างอิงจากจุดฝังตัว"])
-        elif p and user_writable(p):
-            findings.append(("medium", "Registry Run", f"{label}\\{name} -> {p}", ["รันจากโฟลเดอร์ที่ผู้ใช้เขียนได้ (ตรวจสอบเอง)"]))
-    for tname, p in scheduled_tasks():
-        if p in high_files or (os.path.isfile(p) and analyze(p, con)[0] == "high"):
-            bad_tasks.append(tname)
-            findings.append(("high", "Scheduled Task", f"{tname} -> {p}", ["ชี้ไปยังมัลแวร์"]))
-            if os.path.isfile(p) and p not in high_files:
-                high_files[p] = (sha256_of(p), ["ถูกอ้างอิงจาก Scheduled Task"])
+        PROGRESS.update(stage="[3/5] ตรวจจุดฝังตัว", path="")
+        print("[3/5] ตรวจจุดฝังตัว (Registry / Scheduled Task)...")
+        for hive, sub, label, name, val in registry_run_entries():
+            p = extract_path(val)
+            if p and (p in high_files or (os.path.isfile(p) and analyze(p, con)[0] == "high")):
+                bad_reg.append((hive, sub, name))
+                findings.append(("high", "Registry Run", f"{label}\\{sub}\\{name} -> {p}", ["ชี้ไปยังมัลแวร์"]))
+                if os.path.isfile(p) and p not in high_files:
+                    high_files[p] = (sha256_of(p), ["ถูกอ้างอิงจากจุดฝังตัว"])
+            elif p and user_writable(p):
+                findings.append(("medium", "Registry Run", f"{label}\\{name} -> {p}", ["รันจากโฟลเดอร์ที่ผู้ใช้เขียนได้ (ตรวจสอบเอง)"]))
+        for tname, p in scheduled_tasks():
+            if p in high_files or (os.path.isfile(p) and analyze(p, con)[0] == "high"):
+                bad_tasks.append(tname)
+                findings.append(("high", "Scheduled Task", f"{tname} -> {p}", ["ชี้ไปยังมัลแวร์"]))
+                if os.path.isfile(p) and p not in high_files:
+                    high_files[p] = (sha256_of(p), ["ถูกอ้างอิงจาก Scheduled Task"])
 
-    PROGRESS.update(stage="[4/5] ตรวจเครือข่าย / DNS", path="")
-    print("[4/5] ตรวจการเชื่อมต่อเครือข่าย / DNS...")
-    for pid, ip, fam in network_hits(con):
-        findings.append(("high", "เครือข่าย", f"PID {pid} เชื่อมต่อ C2 {ip} ({fam})", ["IP อยู่ในรายการ C2"]))
-        bad_pids.setdefault(pid, f"(เชื่อมต่อ {ip})")
-    for d, fam, src in dns_hits(con):
-        findings.append(("medium", "DNS/hosts", f"{d} ({fam}/{src})", ["เคยเข้าถึงโดเมนอันตราย - ควรเปลี่ยนรหัสผ่าน"]))
+        PROGRESS.update(stage="[4/5] ตรวจเครือข่าย / DNS", path="")
+        print("[4/5] ตรวจการเชื่อมต่อเครือข่าย / DNS...")
+        for pid, ip, fam in network_hits(con):
+            findings.append(("high", "เครือข่าย", f"PID {pid} เชื่อมต่อ C2 {ip} ({fam})", ["IP อยู่ในรายการ C2"]))
+            bad_pids.setdefault(pid, f"(เชื่อมต่อ {ip})")
+        for d, fam, src in dns_hits(con):
+            findings.append(("medium", "DNS/hosts", f"{d} ({fam}/{src})", ["เคยเข้าถึงโดเมนอันตราย - ควรเปลี่ยนรหัสผ่าน"]))
 
-    PROGRESS.update(stage="[5/5] ตรวจประวัติ PowerShell", path="")
-    print("[5/5] ตรวจประวัติ PowerShell...")
-    for n, desc, line in powershell_history():
-        findings.append(("medium", "PowerShell", f"บรรทัด {n}: {line}", [desc]))
+        PROGRESS.update(stage="[5/5] ตรวจประวัติ PowerShell", path="")
+        print("[5/5] ตรวจประวัติ PowerShell...")
+        for n, desc, line in powershell_history():
+            findings.append(("medium", "PowerShell", f"บรรทัด {n}: {line}", [desc]))
 
     if STOP["flag"]:
         scan_issue("หยุดการสแกนก่อนตรวจครบทุกขั้นตอน")
@@ -870,7 +933,8 @@ def cmd_scan(args):
     ] + archive_findings
     LAST_SCAN.clear()
     LAST_SCAN.update(
-        time=dt.datetime.now().isoformat(timespec="seconds"), files=count, clean=bool(args.clean),
+        time=dt.datetime.now().isoformat(timespec="seconds"), files=count, clean=clean,
+        scope="files" if files_only else "system",
         findings=saved_findings, complete=SCAN_AUDIT["issues"] == 0, issues=SCAN_AUDIT["issues"],
         audit={"details": list(SCAN_AUDIT["details"]), "memory": dict(SCAN_AUDIT["memory"])},
     )
@@ -887,7 +951,7 @@ def cmd_scan(args):
             print(f"[!] อ่านประวัติการสแกนไม่สำเร็จ จึงไม่เขียนทับไฟล์เดิม: {e}")
     if history_ok:
         hist.append({
-            "time": LAST_SCAN["time"], "files": count, "clean": bool(args.clean),
+            "time": LAST_SCAN["time"], "files": count, "clean": clean, "scope": LAST_SCAN["scope"],
             "complete": LAST_SCAN["complete"], "issues": LAST_SCAN["issues"], "audit": LAST_SCAN["audit"],
             **totals, "findings_total": len(LAST_SCAN["findings"]),
             "findings": LAST_SCAN["findings"][:100],
@@ -913,7 +977,7 @@ def cmd_scan(args):
         print(f"[{finding['sev'].upper():6}] {finding['kind']}: {finding['target']}\n"
               f"         เหตุผล: {finding['why']} (กักกันทั้ง archive ได้จากตารางผลสแกน)")
 
-    if not args.clean:
+    if not clean:
         if high_files or bad_pids or bad_reg or bad_tasks:
             print("\nพบรายการ HIGH - รันซ้ำพร้อม --clean เพื่อกำจัด (กักกันไฟล์ ไม่ลบทิ้งทันที)")
     else:
@@ -1005,6 +1069,7 @@ def main():
     s.add_argument("--clean", action="store_true")
     s.add_argument("--ask", action="store_true", help="ถามผู้ใช้ทีละรายการที่เป็น MEDIUM/LOW")
     s.add_argument("--full", action="store_true")
+    s.add_argument("--files-only", action="store_true", help="สแกนไฟล์ในโฟลเดอร์ผู้ใช้ที่พบบ่อย โดยไม่ตรวจส่วนระบบ")
     s.add_argument("--paths", nargs="*")
     s.set_defaults(fn=cmd_scan)
     sub.add_parser("quarantine").set_defaults(fn=cmd_quarantine)

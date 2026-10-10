@@ -4,7 +4,7 @@
 rule LunaGuard_XWorm_Strong
 {
     meta:
-        description = "ไฟล์ .NET ที่มีสตริงเฉพาะของ XWorm RAT"
+        description = "ไฟล์ .NET ที่มีตัวบ่งชี้เฉพาะของ XWorm RAT หลายรายการ"
         severity = "high"
     strings:
         $x1 = "<Xwormmm>" ascii wide nocase
@@ -13,7 +13,7 @@ rule LunaGuard_XWorm_Strong
         $net1 = "mscoree.dll" ascii nocase
         $net2 = "BSJB" ascii
     condition:
-        uint16(0) == 0x5A4D and $net1 and $net2 and any of ($x*)
+        uint16(0) == 0x5A4D and $net1 and $net2 and         2 of ($x*)
 }
 
 rule LunaGuard_XWorm_Weak
@@ -23,10 +23,14 @@ rule LunaGuard_XWorm_Weak
         severity = "medium"
     strings:
         $x = "XWorm" ascii wide nocase
+        $specific1 = "<Xwormmm>" ascii wide nocase
+        $specific2 = "XWorm V" ascii wide nocase
+        $specific3 = "Xklog" ascii wide nocase
         $net1 = "mscoree.dll" ascii nocase
         $net2 = "BSJB" ascii
     condition:
-        uint16(0) == 0x5A4D and filesize < 5MB and $x and $net1 and $net2
+        uint16(0) == 0x5A4D and filesize < 5MB and $x and $net1 and $net2 and
+        not any of ($specific*)
 }
 
 rule LunaGuard_PowerShell_Loader

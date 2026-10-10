@@ -3,13 +3,12 @@ name: Windows app
 on:
   push:
     branches: [main]
-    tags: ["v*"]
   pull_request:
     branches: [main]
   workflow_dispatch:
 
 permissions:
-  contents: write
+  contents: read
 
 env:
   PYTHONIOENCODING: utf-8
@@ -34,8 +33,3 @@ jobs:
           name: LunaGuard-Windows
           path: dist/LunaGuard.exe
           if-no-files-found: error
-      - name: Publish tagged release
-        if: startsWith(github.ref, 'refs/tags/v')
-        uses: softprops/action-gh-release@v2
-        with:
-          files: dist/LunaGuard.exe

@@ -3,7 +3,8 @@
 import argparse, contextlib, hashlib, io, json, os, struct, sys, tempfile, threading, unittest, zipfile
 from pathlib import Path
 from unittest import mock
-from urllib.request import urlopen
+from urllib.error import HTTPError
+from urllib.request import Request, urlopen
 
 ROOT = Path(tempfile.mkdtemp(prefix="lg_"))
 os.environ.update(LOCALAPPDATA=str(ROOT / "local"), APPDATA=str(ROOT / "AppData"), TEMP=str(ROOT / "AppData/Temp"),
@@ -13,7 +14,7 @@ import luna_guard as lg
 import luna_dashboard as dashboard
 import luna_app as app
 
-XW = b"MZ" + b"\0" * 60 + b"mscoree.dll BSJB " + "<Xwormmm>".encode("utf-16le") + b"\0" * 20
+XW = b"MZ" + b"\0" * 60 + b"mscoree.dll BSJB " + "<Xwormmm>".encode("utf-16le") + b" Xklog\0" * 20
 TMP = ROOT / "AppData/Temp"; TMP.mkdir(parents=True)
 CMDS, OUT = [], {"netstat": "", "sch": "", "dns": "", "procs": "[]"}
 
@@ -47,10 +48,13 @@ lg.run, lg.winreg = fake_run, FakeReg
 RUNKEY = ("HKCU", r"Software\Microsoft\Windows\CurrentVersion\Run")
 
 
-def scan(clean=False, paths=None):
+def scan(clean=False, paths=None, files_only=False):
     buf = io.StringIO()
     with mock.patch.object(lg, "scan_process_memory", return_value=[]), contextlib.redirect_stdout(buf):
-        lg.cmd_scan(argparse.Namespace(clean=clean, full=False, paths=paths or [str(TMP)]))
+        lg.cmd_scan(argparse.Namespace(
+            clean=clean, files_only=files_only, full=False,
+            paths=None if files_only else (paths or [str(TMP)]),
+        ))
     return buf.getvalue(), lg.LAST_SCAN
 
 
@@ -89,6 +93,104 @@ class T(unittest.TestCase):
 
     def test04_system_name_mimic(self):
         (TMP / "csrss.exe").write_bytes(XW); _, r = scan(); self.assertEqual(sev(r, "ไฟล์"), ["high"])
+
+    def test37_wmpnscfg_name_alone_is_not_suspicious(self):
+        (TMP / "wmpnscfg.exe").write_bytes(b"MZ" + b"ordinary signed program " * 30)
+        _, result = scan()
+        self.assertEqual(result["findings"], [])
+
+    def test38_generic_xworm_marker_cannot_be_high(self):
+        path = TMP / "vivoxsdk.dll"
+        path.write_bytes(b"MZ" + b"\0" * 60 + b"mscoree.dll BSJB xworm")
+        con = lg.db()
+        with mock.patch.object(lg, "yara_scan_file", return_value=[]):
+            severity, reasons, _ = lg.analyze(str(path), con)
+        con.close()
+        self.assertEqual(severity, "medium")
+        self.assertTrue(any("ยังไม่ยืนยัน" in reason for reason in reasons))
+
+    def test39_default_scan_roots_are_focused_and_deduplicated(self):
+        home = ROOT / "focused-home"
+        appdata = home / "Roaming"
+        temp = home / "Local" / "Temp"
+        downloads = home / "Downloads"
+        startup = appdata / "Microsoft" / "Windows" / "Start Menu" / "Programs" / "Startup"
+        for directory in (temp, appdata, downloads, startup):
+            directory.mkdir(parents=True, exist_ok=True)
+        env = {"TEMP": str(temp), "APPDATA": str(appdata), "LOCALAPPDATA": str(home / "Local")}
+        with mock.patch.dict(os.environ, env), mock.patch.object(Path, "home", return_value=home):
+            roots = lg.default_scan_dirs()
+        self.assertEqual(roots, [str(temp), str(appdata), str(downloads)])
+        self.assertFalse(any(str(home / "Local") == root for root in roots))
+
+    def test40_file_only_scan_skips_system_checks_and_records_scope(self):
+        (TMP / "ordinary.exe").write_bytes(b"MZ" + b"ordinary content " * 20)
+        rules = mock.Mock()
+        rules.match.return_value = []
+        skipped_checks = (
+            "list_processes", "scan_process_memory", "registry_run_entries",
+            "scheduled_tasks", "network_hits", "dns_hits", "powershell_history",
+        )
+        with mock.patch.object(lg, "default_scan_dirs", return_value=[str(TMP)]), \
+                mock.patch.object(lg, "yara_rules", return_value=rules), \
+                contextlib.ExitStack() as stack:
+            checks = {name: stack.enter_context(mock.patch.object(lg, name)) for name in skipped_checks}
+            output, result = scan(files_only=True)
+        self.assertEqual(result["scope"], "files")
+        self.assertEqual(result["files"], 1)
+        self.assertIn("ข้ามการตรวจ process, memory", output)
+        for check in checks.values():
+            check.assert_not_called()
+        history = json.loads(lg.HISTORY.read_text(encoding="utf-8"))
+        self.assertEqual(history[-1]["scope"], "files")
+
+    def test41_dashboard_starts_file_only_mode_and_rejects_conflicting_options(self):
+        server = dashboard.ThreadingHTTPServer(("127.0.0.1", 0), dashboard.H)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        base = f"http://127.0.0.1:{server.server_address[1]}/api/scan"
+
+        def post(payload):
+            request = Request(
+                base, data=json.dumps(payload).encode("utf-8"),
+                headers={"X-T": dashboard.TOKEN, "Content-Type": "application/json"},
+                method="POST",
+            )
+            try:
+                with urlopen(request, timeout=5) as response:
+                    return response.status, json.loads(response.read())
+            except HTTPError as error:
+                try:
+                    return error.code, json.loads(error.read())
+                finally:
+                    error.close()
+
+        jobs = []
+        try:
+            with mock.patch.object(
+                dashboard, "start",
+                side_effect=lambda name, job: jobs.append((name, job)) or True,
+            ) as start:
+                status, response = post({"files_only": True})
+                self.assertEqual((status, response["ok"]), (200, True))
+                self.assertEqual(jobs[0][0], "สแกนไฟล์แบบอัตโนมัติ")
+                with mock.patch.object(lg, "cmd_scan") as cmd_scan:
+                    jobs[0][1]()
+                    self.assertTrue(cmd_scan.call_args.args[0].files_only)
+                    self.assertFalse(cmd_scan.call_args.args[0].clean)
+
+                status, response = post({"files_only": True, "clean": True})
+                self.assertEqual(status, 400)
+                self.assertIn("read-only", response["error"])
+                status, response = post({"files_only": True, "paths": [str(TMP)]})
+                self.assertEqual(status, 400)
+                status, response = post({"files_only": True, "full": True})
+                self.assertEqual(status, 400)
+                self.assertEqual(start.call_count, 1)
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=5)
 
     def test05_powershell_loader_is_medium_not_cleaned(self):
         f = TMP / "l.ps1"; f.write_bytes(b'x.DownloadString("http://a");[Convert]::FromBase64String($a);-WindowStyle Hidden')
