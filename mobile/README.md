@@ -23,6 +23,8 @@ The GitHub Actions workflow builds and tests the Android APK on Linux and compil
 ## Scope and privacy
 
 - Scans files selected in the native file picker sequentially, with visible per-file progress. File bytes are processed locally in chunks and are not uploaded.
+- On Android, the user can select a directory through the system picker and rescan that directory and its descendants later. The SAF permission and selected directory are persisted; choose a new directory if access is revoked. This does not grant access to the whole device, other apps' private data, or protected system directories.
+- Folder scans can be stopped. Scan history stores the latest 50 per-file results, including incomplete reads and findings.
 - Computes SHA-256 and compares against an optional local text list imported by the user. Imported hashes are kept in device preferences.
 - Applies a small offline set of XWorm and suspicious PowerShell string heuristics. A HIGH XWorm heuristic requires at least two distinct XWorm-specific strings plus .NET markers; a single or generic marker is review-only, not confirmation of infection. This is not the desktop YARA engine and is not a replacement for mobile platform protections.
 - Archive containers are marked incomplete; archive contents are not inspected.

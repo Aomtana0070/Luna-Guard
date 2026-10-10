@@ -57,6 +57,10 @@ class _DigestSink implements Sink<Digest> {
       _digest ?? (throw StateError('SHA-256 stream produced no digest'));
 }
 
+class ScanCancelledException implements Exception {
+  const ScanCancelledException();
+}
+
 class FileScanner {
   static const _scriptExtensions = {
     '.exe',
@@ -86,11 +90,15 @@ class FileScanner {
   static const _powerShellHidden = '-windowstyle hidden';
   static const _powerShellBypass = '-executionpolicy bypass';
   static const _defenderExclusion = 'add-mppreference';
+  static const _processingChunkBytes = 64 * 1024;
+  static const _yieldAfterBytes = 512 * 1024;
 
   static Future<FileScanResult> scan({
     required String name,
     required Stream<List<int>> content,
     Set<String> knownHashes = const {},
+    void Function(int bytesScanned)? onProgress,
+    bool Function()? isCancelled,
   }) async {
     final digestSink = _DigestSink();
     final hashInput = sha256.startChunkedConversion(digestSink);
@@ -112,39 +120,60 @@ class FileScanner {
     var hasHidden = false;
     var hasBypass = false;
     var hasDefenderExclusion = false;
+    var bytesSinceYield = 0;
 
     await for (final chunk in content) {
-      hashInput.add(chunk);
-      totalBytes += chunk.length;
-      if (prefix.length < 2) {
-        prefix.addAll(chunk.take(2 - prefix.length));
+      for (var offset = 0;
+          offset < chunk.length;
+          offset += _processingChunkBytes) {
+        if (isCancelled?.call() ?? false) {
+          throw const ScanCancelledException();
+        }
+        final nextOffset = offset + _processingChunkBytes;
+        final end = nextOffset < chunk.length ? nextOffset : chunk.length;
+        final part = chunk.sublist(offset, end);
+        hashInput.add(part);
+        totalBytes += part.length;
+        bytesSinceYield += part.length;
+        if (prefix.length < 2) {
+          prefix.addAll(part.take(2 - prefix.length));
+        }
+        if (isCancelled?.call() ?? false) {
+          throw const ScanCancelledException();
+        }
+        final combined = <int>[...carry, ...part];
+        final lower = _asciiLower(combined);
+        final text = latin1.decode(lower);
+        bool containsAscii(String value) => text.contains(value);
+        bool containsWide(String value) =>
+            text.contains(latin1.decode(_toWideAscii(ascii.encode(value))));
+        hasMscoreeMarker |= containsAscii('mscoree.dll');
+        hasBsjbMarker |= containsAscii('bsjb');
+        xwormIndicators.addAll(_wormSignatures.where(
+          (marker) => containsAscii(marker) || containsWide(marker),
+        ));
+        hasWeakXworm |= containsAscii('xworm') || containsWide('xworm');
+        hasDownload |= containsAscii(_powerShellDownload) ||
+            containsWide(_powerShellDownload);
+        hasBase64 |=
+            containsAscii(_powerShellBase64) || containsWide(_powerShellBase64);
+        hasHidden |=
+            containsAscii(_powerShellHidden) || containsWide(_powerShellHidden);
+        hasBypass |=
+            containsAscii(_powerShellBypass) || containsWide(_powerShellBypass);
+        hasDefenderExclusion |= containsAscii(_defenderExclusion) ||
+            containsWide(_defenderExclusion);
+        carry = combined.length <= carryLimit
+            ? combined
+            : combined.sublist(combined.length - carryLimit);
+        if (bytesSinceYield >= _yieldAfterBytes) {
+          onProgress?.call(totalBytes);
+          await Future<void>.delayed(Duration.zero);
+          bytesSinceYield = 0;
+        }
       }
-      final combined = <int>[...carry, ...chunk];
-      final lower = _asciiLower(combined);
-      final text = latin1.decode(lower);
-      bool containsAscii(String value) => text.contains(value);
-      bool containsWide(String value) =>
-          text.contains(latin1.decode(_toWideAscii(ascii.encode(value))));
-      hasMscoreeMarker |= containsAscii('mscoree.dll');
-      hasBsjbMarker |= containsAscii('bsjb');
-      xwormIndicators.addAll(_wormSignatures.where(
-        (marker) => containsAscii(marker) || containsWide(marker),
-      ));
-      hasWeakXworm |= containsAscii('xworm') || containsWide('xworm');
-      hasDownload |= containsAscii(_powerShellDownload) ||
-          containsWide(_powerShellDownload);
-      hasBase64 |=
-          containsAscii(_powerShellBase64) || containsWide(_powerShellBase64);
-      hasHidden |=
-          containsAscii(_powerShellHidden) || containsWide(_powerShellHidden);
-      hasBypass |=
-          containsAscii(_powerShellBypass) || containsWide(_powerShellBypass);
-      hasDefenderExclusion |= containsAscii(_defenderExclusion) ||
-          containsWide(_defenderExclusion);
-      carry = combined.length <= carryLimit
-          ? combined
-          : combined.sublist(combined.length - carryLimit);
     }
+    onProgress?.call(totalBytes);
     hashInput.close();
     final hash = digestSink.digest.toString();
     final reasons = <String>[];

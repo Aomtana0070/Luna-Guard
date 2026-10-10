@@ -19,6 +19,40 @@ void main() {
     expect(result.level, FindingLevel.clean);
   });
 
+  test('processes large source chunks in bounded responsive slices', () async {
+    final progress = <int>[];
+    final result = await FileScanner.scan(
+      name: 'large.exe',
+      content: Stream<List<int>>.value([
+        0x4d,
+        0x5a,
+        ...List<int>.filled(2 * 1024 * 1024, 0x41),
+      ]),
+      onProgress: progress.add,
+    );
+
+    expect(result.bytes, 2 * 1024 * 1024 + 2);
+    expect(result.complete, isTrue);
+    expect(progress.length, greaterThan(1));
+    expect(progress.last, result.bytes);
+    expect(progress, orderedEquals([...progress]..sort()));
+  });
+
+  test('cancels between bounded processing slices', () async {
+    var cancelled = false;
+    await expectLater(
+      FileScanner.scan(
+        name: 'large.exe',
+        content: Stream<List<int>>.value(
+          List<int>.filled(2 * 1024 * 1024, 0x41),
+        ),
+        onProgress: (_) => cancelled = true,
+        isCancelled: () => cancelled,
+      ),
+      throwsA(isA<ScanCancelledException>()),
+    );
+  });
+
   test('detects XWorm-specific strings split across input chunks', () async {
     final content = Stream<List<int>>.fromIterable([
       [0x4d, 0x5a, ...ascii.encode('mscoree.dll BSJB <Xworm')],

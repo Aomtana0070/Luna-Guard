@@ -1,7 +1,7 @@
 name: luna_guard_mobile
 description: On-device file checker for Luna Guard on Android and iOS.
 publish_to: none
-version: 1.4.2+3
+version: 1.4.3+4
 
 environment:
   sdk: ^3.11.0
@@ -12,6 +12,7 @@ dependencies:
   file_picker: ^13.1.0
   flutter:
     sdk: flutter
+  saf: ^2.1.2
   shared_preferences: ^2.5.6
 
 dev_dependencies:

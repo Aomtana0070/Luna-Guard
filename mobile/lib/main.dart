@@ -1,7 +1,9 @@
 import 'dart:convert';
+import 'dart:io' show Platform;
 
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
+import 'package:saf/saf.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import 'scanner.dart';
@@ -17,25 +19,38 @@ const _translations = <String, Map<String, String>>{
     'tagline': 'ตรวจไฟล์บนอุปกรณ์ของคุณ',
     'scanTitle': 'เลือกไฟล์ที่ต้องการตรวจ',
     'scanInfo':
-        'เลือกไฟล์ได้หลายไฟล์เพื่อตรวจต่อเนื่องด้วย SHA-256 และกฎออฟไลน์ ข้อมูลจะประมวลผลในเครื่องและไม่ถูกอัปโหลด',
+        'เลือกไฟล์ได้หลายไฟล์เพื่อตรวจด้วย SHA-256 และกฎออฟไลน์ ข้อมูลจะประมวลผลในเครื่องและไม่ถูกอัปโหลด',
+    'scanInfoAndroid':
+        'เลือกหลายไฟล์ หรือเลือกโฟลเดอร์ที่ Android อนุญาตเพื่อสแกนไฟล์และโฟลเดอร์ย่อยซ้ำ ข้อมูลจะประมวลผลในเครื่องและไม่ถูกอัปโหลด',
     'pickFiles': 'เลือกไฟล์เพื่อสแกน',
     'scanning': 'กำลังตรวจไฟล์…',
     'scanProgress': 'กำลังตรวจไฟล์ที่ {current} จาก {total}',
+    'scanProgressBytes': 'ไฟล์ {current}/{total} · {bytes} ไบต์',
+    'scanFolder': 'เลือกโฟลเดอร์เพื่อสแกน',
+    'scanSavedFolder': 'สแกนโฟลเดอร์ {folder}',
+    'changeFolder': 'เปลี่ยนโฟลเดอร์',
+    'folderProgress': 'ตรวจแล้ว {count} ไฟล์ · {name} · {bytes} ไบต์',
+    'folderScanDone': 'ตรวจแล้ว {count} ไฟล์ · พบ {findings} รายการ · อ่านไม่สำเร็จ {errors}',
+    'folderScanError': 'สแกนโฟลเดอร์ไม่สำเร็จ: {error}',
+    'folderPermissionExpired': 'สิทธิ์เข้าถึงโฟลเดอร์หมดอายุ กรุณาเลือกโฟลเดอร์ใหม่',
+    'stopScan': 'หยุดสแกน',
+    'scanStopped': 'หยุดสแกนแล้วหลังตรวจ {count} ไฟล์',
     'privacyTitle': 'ขอบเขตการทำงานบนมือถือ',
     'privacyInfo':
-        'แอปตรวจเฉพาะไฟล์ที่คุณเลือก ไม่สามารถสแกนหน่วยความจำ แอปอื่น หรือทั้งเครื่องได้ ไฟล์บีบอัดจะระบุว่าสแกนไม่ครบ',
+        'Android: เลือกโฟลเดอร์ที่อนุญาตเพื่อสแกนไฟล์และโฟลเดอร์ย่อยซ้ำได้; iOS: เลือกไฟล์เอง แอปไม่สแกนหน่วยความจำหรือพื้นที่ส่วนตัวของแอปอื่น และไฟล์บีบอัดจะระบุว่าสแกนไม่ครบ',
     'noThreats': 'ไม่พบรูปแบบที่รู้จัก',
     'threatFound': 'พบสิ่งน่าสงสัย',
     'scanIncomplete': 'สแกนไม่ครบ',
     'hash': 'SHA-256',
     'fileSize': 'ขนาด',
+    'filePath': 'ชื่อไฟล์ / ตำแหน่ง',
     'bytes': 'ไบต์',
     'why': 'รายละเอียด',
     'noHistory': 'ยังไม่มีประวัติการสแกน',
     'guideText':
         'เลือกไฟล์จากตัวเลือกไฟล์ของ Android หรือ iOS แอปอ่านไฟล์ทีละส่วนและคำนวณ SHA-256 บนอุปกรณ์ การสแกนเป็นแบบอ่านอย่างเดียว',
     'guideLimits':
-        'แอปมือถือไม่สามารถตรวจหน่วยความจำหรือไฟล์ส่วนตัวของแอปอื่นได้ กฎมือถือเป็นชุดตรวจจับพื้นฐาน ไม่ใช่เอนจิน YARA เต็มรูปแบบ และไม่รับประกันว่าจะพบมัลแวร์ทุกชนิด',
+        'บน Android เลือกโฟลเดอร์ที่ระบบอนุญาตเพื่อสแกนไฟล์ในโฟลเดอร์และโฟลเดอร์ย่อยได้ แอปไม่สามารถเข้าถึงข้อมูลส่วนตัวของแอปอื่นหรือบางโฟลเดอร์ระบบได้ บน iOS ต้องเลือกไฟล์เอง กฎมือถือเป็นชุดตรวจจับพื้นฐาน ไม่ใช่เอนจิน YARA เต็มรูปแบบ และไม่รับประกันว่าจะพบมัลแวร์ทุกชนิด',
     'hashTitle': 'รายการ SHA-256 ในเครื่อง',
     'hashInfo':
         'นำเข้าไฟล์ข้อความที่มี SHA-256 ที่เชื่อถือได้ รายการจะเก็บในอุปกรณ์นี้เท่านั้น',
@@ -77,24 +92,37 @@ const _translations = <String, Map<String, String>>{
     'scanTitle': 'Choose files to inspect',
     'scanInfo':
         'Select multiple files for sequential SHA-256 and offline signature checks. Files are processed on-device and never uploaded.',
+    'scanInfoAndroid':
+        'Select multiple files or an Android-authorized folder to rescan its files and subfolders. Data is processed on-device and never uploaded.',
     'pickFiles': 'Choose files',
     'scanning': 'Inspecting files…',
     'scanProgress': 'Inspecting file {current} of {total}',
+    'scanProgressBytes': 'File {current}/{total} · {bytes} bytes',
+    'scanFolder': 'Choose folder to scan',
+    'scanSavedFolder': 'Scan saved folder: {folder}',
+    'changeFolder': 'Change folder',
+    'folderProgress': 'Scanned {count} files · {name} · {bytes} bytes',
+    'folderScanDone': 'Scanned {count} files · {findings} findings · {errors} read errors',
+    'folderScanError': 'Could not scan folder: {error}',
+    'folderPermissionExpired': 'Folder access expired. Choose the folder again.',
+    'stopScan': 'Stop scan',
+    'scanStopped': 'Scan stopped after {count} files',
     'privacyTitle': 'Mobile scanning scope',
     'privacyInfo':
-        'Only files you select are inspected. The app cannot scan memory, other apps, or the whole device. Archives are marked incomplete.',
+        'Android: choose an allowed folder to rescan its files and subfolders. iOS: select files manually. The app cannot scan memory or other apps’ private storage; archives are marked incomplete.',
     'noThreats': 'No known pattern found',
     'threatFound': 'Suspicious pattern found',
     'scanIncomplete': 'Scan incomplete',
     'hash': 'SHA-256',
     'fileSize': 'Size',
+    'filePath': 'File / path',
     'bytes': 'bytes',
     'why': 'Details',
     'noHistory': 'No scan history yet',
     'guideText':
         'Choose files using the Android or iOS file picker. Luna Guard reads selected files in chunks and computes SHA-256 on-device. Scanning is read-only.',
     'guideLimits':
-        'The mobile app cannot inspect memory or private files of other apps. Mobile detection uses a basic signature set, not the full YARA engine, and cannot guarantee detection of every threat.',
+        'On Android, choose a system-authorized folder to scan its files and subfolders. The app cannot access other apps’ private data or some protected system folders. On iOS, select files individually. Mobile detection uses a basic signature set, not the full YARA engine, and cannot guarantee detection of every threat.',
     'hashTitle': 'Local SHA-256 list',
     'hashInfo':
         'Import a text file containing trusted SHA-256 values. The list stays on this device.',
@@ -138,21 +166,33 @@ const _translations = <String, Map<String, String>>{
     'tagline': '本机文件检查',
     'scanTitle': '选择要检查的文件',
     'scanInfo': '可选择多个文件，依次使用 SHA-256 和离线特征检查。文件仅在设备上处理，不会上传。',
+    'scanInfoAndroid': '可选择多个文件，或选择 Android 授权的文件夹以重复扫描其中的文件和子文件夹。数据仅在设备上处理，不会上传。',
     'pickFiles': '选择文件',
     'scanning': '正在检查文件…',
     'scanProgress': '正在检查第 {current} 个文件，共 {total} 个',
+    'scanProgressBytes': '文件 {current}/{total} · {bytes} 字节',
+    'scanFolder': '选择要扫描的文件夹',
+    'scanSavedFolder': '扫描已保存的文件夹：{folder}',
+    'changeFolder': '更改文件夹',
+    'folderProgress': '已扫描 {count} 个文件 · {name} · {bytes} 字节',
+    'folderScanDone': '已扫描 {count} 个文件 · 发现 {findings} 项 · 读取错误 {errors} 项',
+    'folderScanError': '无法扫描文件夹：{error}',
+    'folderPermissionExpired': '文件夹访问权限已失效，请重新选择文件夹。',
+    'stopScan': '停止扫描',
+    'scanStopped': '已在扫描 {count} 个文件后停止',
     'privacyTitle': '手机扫描范围',
-    'privacyInfo': '仅检查您选择的文件。应用无法扫描内存、其他应用或整台设备。压缩包会标记为扫描未完成。',
+    'privacyInfo': 'Android：选择一个授权文件夹即可重复扫描其中的文件和子文件夹。iOS：请手动选择文件。应用无法扫描内存或其他应用的私有存储；压缩包会标记为扫描未完成。',
     'noThreats': '未发现已知特征',
     'threatFound': '发现可疑特征',
     'scanIncomplete': '扫描未完成',
     'hash': 'SHA-256',
     'fileSize': '大小',
+    'filePath': '文件/路径',
     'bytes': '字节',
     'why': '详情',
     'noHistory': '暂无扫描历史',
     'guideText': '使用 Android 或 iOS 文件选择器选择文件。Luna Guard 会在本机分块读取并计算 SHA-256。扫描为只读。',
-    'guideLimits': '手机应用无法检查内存或其他应用的私有文件。移动版使用基础特征，而非完整 YARA 引擎，不能保证检测所有威胁。',
+    'guideLimits': '在 Android 上，选择一个系统授权的文件夹即可扫描其中的文件和子文件夹。应用无法访问其他应用的私有数据或部分受保护的系统文件夹。在 iOS 上，请逐个选择文件。移动版使用基础特征，而非完整 YARA 引擎，不能保证检测所有威胁。',
     'hashTitle': '本机 SHA-256 列表',
     'hashInfo': '导入包含可信 SHA-256 值的文本文件。列表仅保存在此设备。',
     'importHashes': '导入 SHA-256 列表',
@@ -189,6 +229,7 @@ class LunaGuardMobileApp extends StatefulWidget {
 
 class _LunaGuardMobileAppState extends State<LunaGuardMobileApp> {
   final _preferences = SharedPreferencesAsync();
+  final _saf = Saf();
   String _language = 'th';
   Set<String> _knownHashes = {};
   List<FileScanResult> _history = [];
@@ -198,6 +239,11 @@ class _LunaGuardMobileAppState extends State<LunaGuardMobileApp> {
   bool _scanning = false;
   int _scanProgress = 0;
   int _scanTotal = 0;
+  int _scanBytes = 0;
+  String _scanCurrentName = '';
+  bool _cancelScan = false;
+  String? _autoScanFolderUri;
+  String? _autoScanFolderName;
   String? _loadError;
 
   String tr(String key, [Map<String, String> values = const {}]) {
@@ -218,6 +264,10 @@ class _LunaGuardMobileAppState extends State<LunaGuardMobileApp> {
     try {
       final language = await _preferences.getString('language') ?? 'th';
       final hashes = await _preferences.getStringList('known_hashes') ?? [];
+      final autoScanFolderUri =
+          await _preferences.getString('auto_scan_folder_uri');
+      final autoScanFolderName =
+          await _preferences.getString('auto_scan_folder_name');
       final rawHistory = await _preferences.getString('scan_history');
       final decoded = rawHistory == null
           ? <dynamic>[]
@@ -226,6 +276,8 @@ class _LunaGuardMobileAppState extends State<LunaGuardMobileApp> {
       setState(() {
         _language = _translations.containsKey(language) ? language : 'th';
         _knownHashes = hashes.toSet();
+        _autoScanFolderUri = autoScanFolderUri;
+        _autoScanFolderName = autoScanFolderName;
         _history = decoded
             .map((entry) => FileScanResult.fromJson(
                 Map<String, dynamic>.from(entry as Map)))
@@ -255,23 +307,36 @@ class _LunaGuardMobileAppState extends State<LunaGuardMobileApp> {
       if (files.isEmpty || !mounted) return;
       setState(() {
         _scanning = true;
+        _cancelScan = false;
         _scanProgress = 0;
         _scanTotal = files.length;
+        _scanBytes = 0;
         _lastResults = [];
       });
       final results = <FileScanResult>[];
       for (var index = 0; index < files.length; index++) {
+        if (_cancelScan) break;
         final file = files[index];
         if (mounted) {
-          setState(() => _scanProgress = index + 1);
+          setState(() {
+            _scanProgress = index + 1;
+            _scanCurrentName = file.name;
+            _scanBytes = 0;
+          });
         }
         try {
           final result = await FileScanner.scan(
             name: file.name,
             content: file.readAsByteStream(),
             knownHashes: _knownHashes,
+            onProgress: (bytes) {
+              if (mounted) setState(() => _scanBytes = bytes);
+            },
+            isCancelled: () => _cancelScan,
           );
           results.add(result);
+        } on ScanCancelledException {
+          break;
         } catch (error) {
           results.add(FileScanResult(
             name: file.name,
@@ -291,6 +356,7 @@ class _LunaGuardMobileAppState extends State<LunaGuardMobileApp> {
         _scanning = false;
         _scanProgress = 0;
         _scanTotal = 0;
+        _scanBytes = 0;
       });
       await _saveHistory();
     } catch (error) {
@@ -299,9 +365,157 @@ class _LunaGuardMobileAppState extends State<LunaGuardMobileApp> {
         _scanning = false;
         _scanProgress = 0;
         _scanTotal = 0;
+        _scanBytes = 0;
       });
       _message(tr('scanError', {'error': error.toString()}));
     }
+  }
+
+  Future<void> _pickAutoScanFolder() async {
+    try {
+      final folder = await _saf.pickDirectory(
+        writePermission: false,
+        persistablePermission: true,
+      );
+      if (folder == null || !mounted) return;
+      await _preferences.setString('auto_scan_folder_uri', folder.uri);
+      await _preferences.setString('auto_scan_folder_name', folder.name);
+      if (!mounted) return;
+      setState(() {
+        _autoScanFolderUri = folder.uri;
+        _autoScanFolderName = folder.name;
+      });
+      await _scanAutoFolder(folder.uri, folder.name);
+    } catch (error) {
+      if (!mounted) return;
+      _message(tr('folderScanError', {'error': error.toString()}));
+    }
+  }
+
+  Future<void> _scanSavedAutoFolder() async {
+    final uri = _autoScanFolderUri;
+    if (uri == null) {
+      await _pickAutoScanFolder();
+      return;
+    }
+    try {
+      final permissions = await _saf.persistedPermissions();
+      if (!permissions.any((permission) => permission.uri == uri)) {
+        await _preferences.remove('auto_scan_folder_uri');
+        await _preferences.remove('auto_scan_folder_name');
+        if (!mounted) return;
+        setState(() {
+          _autoScanFolderUri = null;
+          _autoScanFolderName = null;
+        });
+        _message(tr('folderPermissionExpired'));
+        return;
+      }
+      await _scanAutoFolder(uri, _autoScanFolderName ?? uri);
+    } catch (error) {
+      if (!mounted) return;
+      _message(tr('folderScanError', {'error': error.toString()}));
+    }
+  }
+
+  Future<void> _scanAutoFolder(String uri, String folderName) async {
+    if (_scanning) return;
+    setState(() {
+      _scanning = true;
+      _cancelScan = false;
+      _scanProgress = 0;
+      _scanTotal = 0;
+      _scanBytes = 0;
+      _scanCurrentName = '';
+      _lastResults = [];
+    });
+    var scanned = 0;
+    var findingCount = 0;
+    var errorCount = 0;
+    final findings = <FileScanResult>[];
+    try {
+      await for (final entry in _saf.walk(uri)) {
+        if (_cancelScan) break;
+        if (entry.file.isDir) continue;
+        scanned++;
+        if (mounted) {
+          setState(() {
+            _scanProgress = scanned;
+            _scanCurrentName = entry.relativePath;
+            _scanBytes = 0;
+          });
+        }
+        final relativePath = entry.relativePath;
+        FileScanResult result;
+        try {
+          final content = await _saf.readFileStream(
+            entry.file.uri,
+            bufferSize: 64 * 1024,
+          );
+          result = await FileScanner.scan(
+            name: relativePath,
+            content: content,
+            knownHashes: _knownHashes,
+            onProgress: (bytes) {
+              if (mounted) setState(() => _scanBytes = bytes);
+            },
+            isCancelled: () => _cancelScan,
+          );
+        } on ScanCancelledException {
+          scanned--;
+          break;
+        } catch (error) {
+          errorCount++;
+          result = FileScanResult(
+            name: relativePath,
+            sha256: '',
+            bytes: 0,
+            scannedAt: DateTime.now(),
+            level: FindingLevel.clean,
+            reasons: [tr('scanError', {'error': error.toString()})],
+            complete: false,
+          );
+        }
+        _history.insert(0, result);
+        if (_history.length > 50) _history.removeRange(50, _history.length);
+        if (scanned % 10 == 0) await _saveHistory();
+        if (result.level != FindingLevel.clean || !result.complete) {
+          findingCount++;
+          if (findings.length < 50) findings.add(result);
+        }
+      }
+      if (!mounted) return;
+      setState(() {
+        _lastResults = findings;
+        _scanning = false;
+        _scanTotal = 0;
+        _scanBytes = 0;
+      });
+      await _saveHistory();
+      _message(_cancelScan
+          ? tr('scanStopped', {'count': '$scanned'})
+          : tr('folderScanDone', {
+              'count': '$scanned',
+              'findings': '$findingCount',
+              'errors': '$errorCount',
+            }));
+    } catch (error) {
+      if (!mounted) return;
+      setState(() {
+        _scanning = false;
+        _scanTotal = 0;
+        _scanBytes = 0;
+      });
+      await _saveHistory();
+      _message(tr('folderScanError', {
+        'error': '$folderName: $error',
+      }));
+    }
+  }
+
+  void _stopScan() {
+    if (!_scanning) return;
+    setState(() => _cancelScan = true);
   }
 
   Future<void> _importHashes() async {
@@ -457,7 +671,7 @@ class _LunaGuardMobileAppState extends State<LunaGuardMobileApp> {
           _panel(
             icon: Icons.shield_moon_outlined,
             title: tr('scanTitle'),
-            body: tr('scanInfo'),
+            body: tr(Platform.isAndroid ? 'scanInfoAndroid' : 'scanInfo'),
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.stretch,
               children: [
@@ -471,6 +685,23 @@ class _LunaGuardMobileAppState extends State<LunaGuardMobileApp> {
                       : const Icon(Icons.folder_open),
                   label: Text(_scanning ? tr('scanning') : tr('pickFiles')),
                 ),
+                if (Platform.isAndroid) ...[
+                  const SizedBox(height: 8),
+                  OutlinedButton.icon(
+                    onPressed: _scanning ? null : _scanSavedAutoFolder,
+                    icon: const Icon(Icons.folder_special_outlined),
+                    label: Text(_autoScanFolderUri == null
+                        ? tr('scanFolder')
+                        : tr('scanSavedFolder', {
+                            'folder': _autoScanFolderName ?? '',
+                          })),
+                  ),
+                  if (_autoScanFolderUri != null)
+                    TextButton(
+                      onPressed: _scanning ? null : _pickAutoScanFolder,
+                      child: Text(tr('changeFolder')),
+                    ),
+                ],
                 if (_scanning) ...[
                   const SizedBox(height: 12),
                   LinearProgressIndicator(
@@ -478,10 +709,23 @@ class _LunaGuardMobileAppState extends State<LunaGuardMobileApp> {
                         _scanTotal == 0 ? null : _scanProgress / _scanTotal,
                   ),
                   const SizedBox(height: 8),
-                  Text(tr('scanProgress', {
-                    'current': '$_scanProgress',
-                    'total': '$_scanTotal',
-                  })),
+                  Text(_scanTotal == 0
+                      ? tr('folderProgress', {
+                          'count': '$_scanProgress',
+                          'name': _scanCurrentName,
+                          'bytes': '$_scanBytes',
+                        })
+                      : tr('scanProgressBytes', {
+                          'current': '$_scanProgress',
+                          'total': '$_scanTotal',
+                          'bytes': '$_scanBytes',
+                        })),
+                  const SizedBox(height: 8),
+                  TextButton.icon(
+                    onPressed: _stopScan,
+                    icon: const Icon(Icons.stop_circle_outlined),
+                    label: Text(tr('stopScan')),
+                  ),
                 ],
               ],
             ),
@@ -548,7 +792,10 @@ class _LunaGuardMobileAppState extends State<LunaGuardMobileApp> {
         children: [
           Align(
             alignment: Alignment.centerLeft,
-            child: Text('${tr('fileSize')}: ${result.bytes} ${tr('bytes')}'),
+            child: SelectableText(
+              '${tr('filePath')}: ${result.name}\n'
+              '${tr('fileSize')}: ${result.bytes} ${tr('bytes')}',
+            ),
           ),
           if (result.sha256.isNotEmpty)
             SelectableText('${tr('hash')}: ${result.sha256}'),
