@@ -1,0 +1,4 @@
+# Runtime dependencies exercised by the desktop CI build.
+pywebview==6.2.1
+yara-python==4.5.4
+pefile==2024.8.26

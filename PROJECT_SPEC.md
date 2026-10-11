@@ -1,141 +1,60 @@
-# Luna Guard — Project Spec (handoff for GitHub Copilot / VS Code)
+# Luna Guard — Project Reference
 
-> วางไฟล์นี้ที่ `.github/copilot-instructions.md` หรือแนบใน Copilot Chat เป็นบริบทของโปรเจกต์
-> UI รองรับภาษาไทย อังกฤษ และจีนตัวย่อ โดยเพิ่มคำแปลใน `locales.json`; ส่วนโค้ด/ชื่อตัวแปรเป็นอังกฤษ
+This file describes the current repository. The product and security decisions are documented in [README.md](README.md), [SECURITY.md](SECURITY.md), and the separate `Luna_Guard_Security_Product_Specification.md` source document supplied to the project maintainer. Older project handoff notes have been replaced because they described unbounded archives and a numeric “security score,” neither of which reflects the current design.
 
-## 1. เป้าหมาย
-แอปเดสก์ท็อปบน **Windows** ตรวจจับและกำจัด **XWorm RAT** และมัลแวร์ที่แพร่ผ่านกลโกงแอบอ้าง "MrBeast" (เว็บแจกเงินปลอม, Discord/CAPTCHA ปลอม, infostealer)
-เป็น **เครื่องมือเสริม** ไม่ใช่ตัวแทน Defender/Malwarebytes — ใช้ข้อมูลภัยคุกคามสาธารณะของ abuse.ch ที่อัปเดตรายวัน
+## Product scope
 
-หลักการออกแบบ (ห้ามละเมิด):
-1. **ไม่ลบไฟล์ทิ้งทันที** — ย้ายเข้า quarantine เสมอ และกู้คืนได้
-2. `--clean` / "สแกน+กำจัด" แตะเฉพาะ **HIGH**; **MEDIUM/LOW = แจ้งเตือนแล้วให้ผู้ใช้เลือก** (กักกัน / ปลอดภัย)
-3. allowlist ใช้กับไฟล์ที่ผู้ใช้ยืนยัน แต่ **แฮชที่ตรงฐานข้อมูลมัลแวร์ชนะ allowlist เสมอ**
-4. `remove_finding` / `allow_file` ทำได้เฉพาะ path ที่อยู่ใน **ผลสแกนล่าสุด** (กันถูกใช้ลบไฟล์มั่ว)
-5. ใช้เฉพาะ Python standard library ในตัวแกนหลัก; แอปเดสก์ท็อปต้องใช้ `pywebview`, ส่วน `yara-python` เป็น optional
-6. เซิร์ฟเวอร์ผูก `127.0.0.1` เท่านั้น และตรวจ token + Host ทุก request
+Luna Guard is an on-demand Windows desktop scanner and quarantine helper, plus a separate limited offline Flutter file checker for Android/iOS. It is not real-time antivirus and must not claim complete protection. Microsoft Defender remains the primary real-time protection layer.
 
-## 2. โครงสร้างไฟล์
-| ไฟล์ | หน้าที่ |
+Desktop scans include focused file scans or system checks for enumerated processes/memory, startup persistence, network/DNS indicators, and PowerShell history. They are read-only unless the user explicitly starts remediation. Remediation automatically acts on HIGH only; MEDIUM/LOW findings require user review. Archive findings apply to members, but quarantine moves the whole archive container.
+
+## Desktop components
+
+| File | Responsibility |
 |---|---|
-| `luna_guard.py` | แกนหลัก: ฐานข้อมูล, อัปเดตฟีด, วิเคราะห์ไฟล์, สแกน 5 ขั้น, กักกัน/กู้คืน, CLI |
-| `luna_dashboard.py` | HTTP server ภายในเครื่อง + REST API + job runner + self-test; เปิด browser จากโหมด standalone เฉพาะเมื่อระบุ `--open-browser` |
-| `dashboard.html` | UI ไฟล์เดียว (HTML/CSS/JS ล้วน ไม่มี CDN) เรียก API ด้วย polling |
-| `locales.json` | ข้อความ UI และคู่มือภาษาไทย อังกฤษ และจีนตัวย่อ (รวมใน EXE) |
-| `logo\Luna_Guard.png` | โลโก้แอป แสดงในหน้าต่างและรวมใน EXE |
-| `logo\Luna_Guard.ico` | ไอคอนหลายขนาดที่สร้างจากโลโก้ ใช้เป็นไอคอน EXE/taskbar ใน build ทุกช่องทาง |
-| `luna_app.py` | แอปเดสก์ท็อป: เปิด server ในเครื่องแล้วแสดง UI ในหน้าต่าง **pywebview**; ถ้าไม่มี dependency แจ้ง error และไม่เปิด browser |
-| `luna_rules.yar` | กฎ YARA (severity: high/medium/low ใน `meta`) |
-| `build.bat` | PyInstaller → `dist\LunaGuard.exe` (`--uac-admin`, bundle html+locales+logo+yar) |
-| `test_luna.py` | unittest (mock คำสั่ง Windows; ครอบคลุม archive และ Defender) |
-| `luna_gui.py` | **เลิกใช้** (tkinter รุ่นแรก) ลบได้ |
+| `luna_guard.py` | CLI, SQLite threat data, feed updates, file/YARA/heuristic scans, system checks, history, remediation. |
+| `luna_quarantine.py` | Durable quarantine states, SHA-256 integrity, safe restore, permanent delete, startup recovery. |
+| `luna_audit.py` | Size-bounded JSONL audit log with an allowlist of fields. |
+| `luna_dashboard.py` | Loopback HTTP API, token/Host/Origin checks, rate/body limits, background jobs and state. |
+| `luna_app.py` | pywebview desktop window wrapper. |
+| `dashboard.html`, `locales.json` | Self-contained responsive UI with Thai, English and Simplified Chinese strings. |
+| `luna_rules.yar`, `rules/` | First-party YARA heuristics with recursive rule discovery and metadata; external community rules require provenance/license review. |
+| `malware_knowledge.json` | Local family descriptions and behavior notes shown with detections. |
+| `test_luna.py`, `test_security.py` | Scanner and security regression suites. |
+| `benchmarks/run_benchmark.py` | Small synthetic smoke benchmark; not a real-world efficacy evaluation. |
 
-ข้อมูลผู้ใช้อยู่ที่ `%LOCALAPPDATA%\LunaGuard\`: `threats.db` (SQLite), `quarantine\*.quar` + `index.json`, `config.json` (คีย์ abuse.ch), `history.json` (30 สแกนล่าสุด), `rules\*.yar` (กฎที่ผู้ใช้เพิ่มเอง)
+## Data and security
 
-## 3. ฐานข้อมูล (SQLite `threats.db`)
-- `hashes(sha256 PK, family, source)` — จาก MalwareBazaar, SHA-256 ที่ ThreatFox ผูกกับ IOC / `add-hash`
-- `iocs(value PK, kind ['ip'|'domain'], family, source)` — ThreatFox IOCs ล่าสุด 7 วัน, URLhaus host feed, seed (`beastxm.com`, `beast-days.com`)
-- `meta(k PK, v)` — `last_update`
-- `allow(sha256 PK, path)` — ไฟล์ที่ผู้ใช้ยืนยันปลอดภัย
+The desktop stores data under `%LOCALAPPDATA%\LunaGuard`: SQLite threat data, local configuration, scan history, quarantine files/index, audit logs, and optional user rules. The malware hash index stores SHA-256/SHA-1/MD5, family, threat name, severity, first/last seen, source confidence, and references; an associated source table retains independent feed provenance. SHA-256, SHA-1, and MD5 are calculated in one streaming pass and checked locally before YARA/PE analysis. ThreatFox and URLhaus indicators keep kind, source, confidence, timestamps, expiration, and active/stale/expired state; stale and expired indicators do not match. The existing `hashes`, `iocs`, and `ioc_lifecycle` tables are retained and migrated forward. YARA and PE/file metadata contribute to a risk score, which is a heuristic score and not a probability. PE signature presence is reported without validating the Authenticode chain.
 
-## 4. อัปเดตฟีด (`cmd_update`, ต้องมี Auth-Key จาก https://auth.abuse.ch)
-คีย์: env `ABUSECH_KEY` ก่อน ถ้าไม่มีอ่าน `config.json` (`get_key`/`save_key`) ส่งเป็น header `Auth-Key`
-- **MalwareBazaar** `POST https://mb-api.abuse.ch/api/v1/` — `get_taginfo` (tag, tag.lower()) และ `get_siginfo` (signature), `limit=1000`, TAGS = `XWorm`, `MrBeast` → ตาราง `hashes` (พิมพ์สถานะ `query_status` ทุกครั้ง)
-- **ThreatFox** `POST https://threatfox-api.abuse.ch/api/v1/` `{"query":"get_iocs","days":7}` → `iocs` (`ip:port`→ip, `url`→hostname) และแฮช SHA-256 ใน `malware_samples` → `hashes`; รองรับข้อมูลแบบ array/object และข้ามรูปแบบ IOC/แฮชที่ไม่รู้จัก
-- **URLhaus** `GET https://urlhaus.abuse.ch/downloads/hostfile/` → `iocs` domain
-- คำขออัปเดต retry สูงสุด 3 ครั้งเฉพาะ network/gateway error ชั่วคราว; `last_update` เปลี่ยนเมื่ออย่างน้อยหนึ่ง feed ตอบสำเร็จเท่านั้น
+The API binds to `127.0.0.1`, uses a random per-run token sent in a request header, checks Host and Origin, requires JSON POST bodies, enforces a 64 KiB body limit and per-IP request limits, and allows only GET/POST. The UI has no CDN and does not place the token in the URL.
 
-## 5. การวิเคราะห์ไฟล์ `analyze(path, con) -> (severity|None, [เหตุผล], sha256)`
-ลำดับ:
-1. ข้ามถ้าขนาด < 64B; ไฟล์ปกติสแกนได้ทุกขนาดโดย hash ทีละ 1 MiB และให้ YARA สแกนจาก path โดยไม่อ่านไฟล์ทั้งหมดเข้าหน่วยความจำ
-2. ถ้านามสกุลไม่ใช่ `SCRIPT_EXT` (`.exe .dll .scr .com .bat .cmd .ps1 .vbs .js`) ต้องขึ้นต้นด้วย `MZ` ไม่งั้นข้าม (เพื่อความเร็ว)
-3. คำนวณ SHA-256 → ตรง `hashes` ⇒ **high**
-4. อยู่ใน `allow` ⇒ ไม่แจ้ง
-5. ไม่ใช่ `SCRIPT_EXT` ⇒ จบ
-6. สแกน YARA (`yara_scan`) — severity จาก `meta.severity` (ค่าเริ่มต้น high)
-7. Heuristic (เฉพาะ PE): ตัวบ่งชี้เฉพาะ XWorm (`<xwormmm>`, `XWorm V`, `xklog` ทั้ง ASCII/UTF-16) **+3**; คำทั่วไป `xworm` **+2**; ชื่อเลียนไฟล์ระบบนอก `%WINDIR%` **+3**; เมื่อมีสัญญาณแล้ว .NET (`mscoree.dll`+`BSJB`) และตำแหน่งที่ผู้ใช้เขียนได้เพิ่มอย่างละ **+1**
-8. ผลรวม: YARA high หรือคะแนน ≥5 ที่มีตัวบ่งชี้เฉพาะ XWorm ⇒ **high**; YARA medium หรือคะแนน ≥3 ⇒ **medium**; YARA low ⇒ **low**. กฎ `LunaGuard_XWorm_Strong` ต้องพบตัวบ่งชี้เฉพาะอย่างน้อย 2 รายการ; คำทั่วไปเพียงตัวเดียวไม่พอให้เป็น HIGH
+Quarantine writes pending metadata before copying, verifies the copied file against the scanned SHA-256, and checks the source again before removal. Restore uses a verified temporary copy and a no-overwrite atomic placement. Startup recovery resolves only unambiguous operations; ambiguous files remain available for manual review. Permanent deletion is explicit and integrity-checked.
 
-การเดินไฟล์ (`walk_files`) ข้าม: `%WINDIR%`, โฟลเดอร์ Windows Defender, `LunaGuard`, และชื่อโฟลเดอร์ใน `SKIP_DIRS` (cache, gpucache, node_modules, .git, `$recycle.bin` …)
-โฟลเดอร์สแกนอัตโนมัติ: `%TEMP%`, `%APPDATA%`, `Downloads`, โฟลเดอร์ Startup; ตัดโฟลเดอร์ย่อยที่ซ้ำออก และไม่เดิน `%LOCALAPPDATA%` ทั้งหมดหรือ `%PROGRAMDATA%` เพื่อให้ขอบเขตแคบและลดเวลาสแกน
+ZIP-based inspection limits work to 10,000 members, 256 MiB per member, 512 MiB total expanded bytes, depth 8, 1,000:1 compression ratio, and 180 seconds per archive. Any exceeded limit or read failure marks the scan incomplete. Scan status uses text/status symbols; the UI does not present a heuristic count as a probability of safety.
 
-### การตรวจ archive และหน่วยความจำ
-- ตรวจ `.zip`, `.jar`, `.docx/.docm`, `.xlsx/.xlsm`, `.pptx/.pptm`, `.apk` โดย stream สมาชิกเป้าหมายผ่านไฟล์ชั่วคราวบน disk; ไม่มีเพดานในแอปสำหรับจำนวนสมาชิก, ข้อมูลคลายบีบอัดรวม, ความลึก nested archive หรือขนาดไฟล์ปกติ
-- การอ่านข้อมูลสมาชิกใช้ buffer 1 MiB จึงไม่เก็บข้อมูลคลายบีบอัดทั้งสมาชิกใน RAM; แต่ ZIP central-directory metadata ยังอยู่ในหน่วยความจำตามการทำงานของ `zipfile` และใช้ RAM เพิ่มตามจำนวนสมาชิก ส่วนพื้นที่ดิสก์/เวลาเพิ่มตามข้อมูลที่ต้องตรวจ; ดิสก์เต็ม, สิทธิ์, ข้อมูลเสียหาย, เข้ารหัส หรือ compression ที่ไม่รองรับจะทำเครื่องหมายผลสแกนว่าไม่ครบ ไม่มีการข้ามเงียบ
-- สำรวจ nested ZIP แบบ iterative ไม่ใช้การเรียกซ้ำของ Python; finding ระบุสมาชิก nested และ container ต้นฉบับ การกักกันทำกับ archive ต้นฉบับทั้งไฟล์
-- YARA ตรวจหน่วยความจำ process ทั้งหมดที่ระบบคืน PID มา ยกเว้น process ของ Luna Guard เอง; PID ที่ Windows ปฏิเสธ, timeout และข้อผิดพลาดจะถูกรายงานและทำให้ผลเป็น “สแกนไม่ครบ”
-- การตรวจพบในหน่วยความจำเป็นการแจ้งเตือนเท่านั้น ไม่สั่งปิด process อัตโนมัติ
-- finding ระบุสมาชิกและ container; สแกน+กำจัดจะไม่ย้าย archive อัตโนมัติ ผู้ใช้เลือกกักกันทั้ง archive ได้จากตารางผล
+## Build and checks
 
-## 6. สแกน (`cmd_scan(args)`, args: `clean, full, files_only, paths, ask`)
-ปุ่ม **สแกนไฟล์อัตโนมัติ** และ `scan --files-only` ตรวจเฉพาะโฟลเดอร์อัตโนมัติด้านบน (รวมการตรวจสมาชิก archive ที่รองรับ), ไม่แก้ไขไฟล์ และข้าม process/หน่วยความจำ, startup entries, network/DNS และ PowerShell history; ไม่รับ `--clean`, `--full` หรือ `--paths` ร่วมกัน
-โหมดสแกนด่วนเดิมตรวจไฟล์และทำอีกสี่ขั้นตอนต่อไปนี้ ส่วน `--full` ตรวจไฟล์ใต้ไดรฟ์ C: ก่อนทำขั้นตอนระบบ
-1. **ไฟล์** — log `▶ เริ่ม / … ตรวจแล้ว N ไฟล์ (ทุก 3 วิ) / ✔ จบ`; สแกนไฟล์รองรับทุกขนาดด้วย streaming hash และ YARA path scan; อัปเดต `PROGRESS`; หยุดได้ด้วย `STOP["flag"]`
-2. **โปรเซส/หน่วยความจำ** — `Get-CimInstance Win32_Process` (PowerShell); ตรวจ executable ที่เข้าถึงได้และรัน YARA `match(pid=...)` กับ process ทุกตัวที่ enumerate ได้ (ยกเว้นตัวแอปเอง); การปฏิเสธ/timeout ถือว่าสแกนไม่ครบ
-3. **จุดฝังตัว** — Registry Run/RunOnce (HKCU/HKLM), Scheduled Tasks (`schtasks /query /fo csv /v`); ชี้ไป high ⇒ high, ชี้ไป path เขียนได้ ⇒ medium
-4. **เครือข่าย/DNS** — `netstat -ano -p tcp` เทียบ IP C2 ⇒ high; `ipconfig /displaydns` + `hosts` เทียบโดเมน ⇒ medium
-5. **PowerShell history** (`ConsoleHost_history.txt`) — pattern IEX/DownloadString/-enc/FromBase64String/mshta http/CAPTCHA ปลอม/ปิด Defender ⇒ medium
-ผลเก็บใน `LAST_SCAN` (`time, files, clean, scope, complete, issues, audit, findings[{sev,kind,target,why}]`) + `history.json` (30 สแกนล่าสุดพร้อมขอบเขตสแกน, จำนวน HIGH/MEDIUM/LOW, ความครบถ้วน, audit และรายละเอียดสูงสุด 100 รายการต่อครั้ง; บันทึกแบบ atomic) หากมีไฟล์/สมาชิก archive/process เข้าถึงไม่ได้, YARA timeout/ผิดพลาด, ข้ามเพราะข้อจำกัด archive หรือหยุดสแกน UI ต้องแสดง “สแกนไม่ครบ”; หากครบและไม่พบ ให้แสดงเพียง “ไม่พบภัยคุกคามในขอบเขตที่ตรวจ” ไม่รับประกันว่าเครื่องปลอดภัยทั้งหมด
-`--clean` ทำ: `taskkill` โปรเซส → ลบค่า Registry Run → `schtasks /delete` → quarantine ไฟล์ (เฉพาะ high)
-CLI: `update | scan [--clean] [--full] [--ask] [--paths ..] | quarantine | restore <id> | add-hash <sha256> | schedule`
+Python runtime/build dependencies are pinned in `requirements.txt` and `requirements-build.txt`. The Windows workflow uses Python 3.14, runs both test modules, builds to `dist/release`, and records SHA-256 and build provenance. The mobile workflow pins Flutter 3.44.9 and builds Android/iOS CI artifacts. Current desktop and mobile release artifacts are not production-signed.
 
-## 7. REST API (`luna_dashboard.py`)
-ทุก request ต้องมี token (`?t=` หรือ header `X-T`) และ `Host` เป็น `127.0.0.1`/`localhost` ไม่งั้น 403
-- `GET /` → dashboard.html; `GET /api/state`; `GET /api/log?since=N`
-- `POST /api/update | /api/scan {clean,full,files_only,paths} | /api/defender-scan {scan_type: quick|full} | /api/selftest | /api/restore {id} | /api/key {key} | /api/remove {path} | /api/allow {path} | /api/stop | /api/elevate`
-- งานยาวรันเป็น thread เดียว (`S["job"]`); ซ้อนงานได้ 409; stdout ของงานถูกจับเข้า `S["log"]` (ระดับสีจากคำนำหน้า `[HIGH`, `[MEDIUM`, `[+]`, `[!]`, `[PASS`, `[FAIL`)
-- `/api/state`: `hashes, iocs, updated, key, yara, admin, defender, job, hist, last, quar, self, prog, n`; Defender status มาจาก `Get-MpComputerStatus` และ cache 30 วินาที; scan request ใช้ `Start-MpScan` บน Windows
-- งาน Defender ถูกส่งผ่าน job runner; Luna Guard แสดงสถานะที่ Windows รายงานและไม่ได้แทนที่หรือควบคุมการตั้งค่า Defender real-time
-- `elevate` ใช้ `ShellExecuteW(... "runas" ...)` แล้วปิดโปรเซสเดิม
+Run the desktop regression suite:
 
-## 8. UI (`dashboard.html`)
-ธีมมืด เขียว/ฟ้า; แท็บ: แดชบอร์ด / กักกัน / Log / ตั้งค่า. องค์ประกอบ id สำคัญ: `ring` (คะแนน), `status` (แยกผลไม่พบภัยในขอบเขตกับสแกนไม่ครบ), `s1..s4` (การ์ดสถิติ), `chart`, `layers` (รวมสถานะ archive/หน่วยความจำ/Defender), `det` (ตารางตรวจพบ + ปุ่มกักกันทั้ง archive), `ask` (แบนเนอร์ไฟล์รอตัดสินใจ), `prog`/`busy`/`stopb`, `term` (log), `qt`, `selfr`; ปุ่ม Defender quick/full scan อยู่ในแดชบอร์ด
-poll `/api/state` ทุก 2 วิ และ `/api/log` ทุก 1 วิ; `esc()` escape ข้อความ; path ในปุ่มใช้ `encodeURIComponent` ใน `data-p`
-คะแนน = 100 − 30×HIGH − 5×(MEDIUM+LOW)
+```powershell
+.\.venv\Scripts\python.exe -m unittest -v test_luna test_security
+```
 
-## 9. การทดสอบ (`python -m unittest -v test_luna`) — 41 ข้อ
-แฮชตรง · YARA XWorm · ไม่แจ้งผิดไฟล์ปกติ · ชื่อเลียนระบบ · loader=MEDIUM ไม่ถูก clean · PowerShell history · C2 connection · โดเมนหลอกลวงใน DNS · อัปเดตจาก abuse.ch (mock) · clean ครบวงจร+กู้คืน · MEDIUM→ผู้ใช้กักกัน · allowlist+กัน path ผิด · LOW · log ความคืบหน้า+ข้าม cache · ปุ่มหยุด · ประวัติ scan และ last result หลัง restart พร้อมรายละเอียด · normalize ThreatFox object + hash · retry 502 · update ล้มเหลวไม่เลื่อนเวลา · ไม่มี pywebview ก็ไม่เปิด browser หรือ server · บันทึกภาษาไทย/อังกฤษ/จีนตัวย่อและตรวจ locale keys
-เพิ่มการทดสอบ nested archive + quarantine/restore, การสแกนเกิน 1,000 สมาชิก, nested ZIP เกิน 2 ชั้น, expanded member 257 MiB พร้อม cleanup temp, disk-full ระหว่างเขียน temp ที่ต้องขึ้นสถานะ scan-incomplete, Defender status/scan validation, ไฟล์ >50 MiB, YARA memory scanning ทุก PID ที่ enumerate ได้, permission denial, การเก็บสถานะ scan-incomplete, ขอบเขต/API สแกนอัตโนมัติ และการลด false positive ของ XWorm; วิธี mock: ตั้ง env (`LOCALAPPDATA`, `APPDATA`, `WINDIR` …) **ก่อน import**; แทน `lg.run`, `lg.winreg` (FakeReg), `lg.http`
-`PATH_RE` รองรับ path แบบ POSIX และ `user_writable`/`in_windows_dir` แปลง `/`→`\` เพื่อให้เทสต์บน Linux ได้
+Run the synthetic benchmark:
 
-## 10. ข้อจำกัด / บั๊กที่เคยเจอ (สำคัญ)
-- **ยังไม่เคยทดสอบกับมัลแวร์ XWorm จริง** — ตัวอย่างทดสอบเป็นไฟล์จำลอง; ยังไม่ยืนยันความแม่นยำจริง
-- ส่วน Windows (netstat/schtasks/ipconfig/registry/CIM) ทดสอบผ่าน mock ใน unit tests; ทดสอบ YARA PID scan บน process ที่เข้าถึงได้จริงหนึ่งตัว ส่วน access denial ทดสอบด้วย mock
-- MalwareBazaar อาจตอบ 502 หรือคืน `no_results` สำหรับบาง tag; ตัวอัปเดต retry gateway/network error ชั่วคราวและแสดงสถานะต่อ query โดยไม่รายงานอัปเดตสำเร็จเมื่อทุก feed ล้มเหลว
-- ประวัติเดิมเก็บเพียงยอดรวม จึงกู้รายละเอียดรายรายการย้อนหลังไม่ได้; การสแกนหลังอัปเดตจะบันทึกรายละเอียดสูงสุด 100 รายการต่อครั้ง
-- สแกนนานมากเมื่อสแกนโฟลเดอร์ใหญ่/ทั้งไดรฟ์ (แก้บางส่วนด้วยการข้ามไฟล์ไม่ใช่โปรแกรม + cache dirs)
-- **บั๊กที่เพิ่งพบและแก้แล้ว**: dashboard ว่างเปล่าเพราะ JS syntax error (เครื่องหมาย `'` ซ้อนในสตริงปุ่ม "รันแบบ Admin"); และสถานะสแกนล่าสุดหายหลังปิดแอปเพราะเก็บไว้ในหน่วยความจำเท่านั้น
-- ThreatFox เคยใช้ query `taginfo` และวนข้อมูลโดยสมมติว่าเป็นรายการ ทำให้ API ที่ตอบ object เกิด `string indices must be integers`; เปลี่ยนเป็น `get_iocs` (7 วัน) และ normalize ข้อมูลก่อนบันทึก
-- Luna Guard ไม่ใช่ real-time protection; มีเพียงการแสดงสถานะ/ส่งคำสั่งสแกนให้ Microsoft Defender และต้องตรวจสอบการตั้งค่า Defender ใน Windows Security แยกต่างหาก
-- ตรวจหน่วยความจำ process ด้วย YARA โดยตรง; ขอบเขต/สิทธิ์ที่ Windows ปฏิเสธจะถูกทำเครื่องหมายสแกนไม่ครบ; ไม่ตรวจ USB โดยตรง, ไม่ตรวจลายเซ็นดิจิทัล, และไม่รับประกันการตรวจพบทุกตระกูล
-- Windows Defender integration, รวมถึงสิทธิ์และสถานะจริงของระบบ, ยังไม่ได้ยืนยันด้วยการสั่ง full scan จริง; การทดสอบ API ใช้ mock
+```powershell
+.\.venv\Scripts\python.exe benchmarks\run_benchmark.py
+```
 
-## 11. Roadmap (เรียงตามความสำคัญ) + เกณฑ์ผ่าน
-1. **เทสต์ UI ใน repo**: jsdom/Playwright โหลด `dashboard.html` กับ server จริง — เกณฑ์: ไม่มี JS error, nav 4 แท็บ, ring วาดแล้ว, ตารางมีปุ่ม
-2. **ตรวจลายเซ็นดิจิทัล** (`Get-AuthenticodeSignature`/WinVerifyTrust) — ไฟล์เซ็นโดยผู้ผลิตที่เชื่อถือได้ลดระดับลง 1 ขั้น; แคชผลตาม sha256
-3. **Real-time watcher** (`ReadDirectoryChangesW`/`watchdog`) บน Temp/Downloads/Startup + แจ้งเตือนเดสก์ท็อป
-4. **ลบ Registry/Task รายตัว** จากปุ่มใน UI (MEDIUM) พร้อมสำรองค่าก่อนลบและกู้คืนได้
-5. **ดึงกฎ YARA ชุมชน** (YARAhub/signature-base) ลง `rules\` อัตโนมัติ + ตรวจ compile ก่อนใช้
-6. **ตรวจ USB** (ไดรฟ์ถอดได้: ไฟล์ซ่อน/ `.lnk` ปลอม/สำเนา exe) — XWorm แพร่ทาง USB
-7. **สแกนหน่วยความจำ/โปรเซสที่ถูก inject**, สแกน ZIP/RAR, ตรวจ extension/session ของเบราว์เซอร์
-8. ตั้งเวลาอัปเดตในตัว (ไม่พึ่ง Task Scheduler), ไอคอนถาดระบบ, ติดตั้ง/เซ็นรับรอง .exe
+## Known limitations
 
-ข้อกำหนดทุกฟีเจอร์ใหม่: เพิ่มเทสต์ unittest, ไม่ทำลายหลักการ §1, log ภาษาไทยที่ขึ้นต้นด้วย `[+]`/`[!]`/`[HIGH`/`[MEDIUM`
-
-## 12. แหล่งข้อมูลวิจัยฐานข้อมูลไวรัส (ถูกกฎหมาย/สาธารณะ — ใช้ IOC, แฮช, กฎ, รายงาน ไม่ใช่ตัวมัลแวร์)
-| แหล่ง | ใช้ทำอะไร |
-|---|---|
-| **MalwareBazaar** (bazaar.abuse.ch) | แฮช/แท็ก/signature ตัวอย่าง; ต้อง Auth-Key |
-| **ThreatFox** (threatfox.abuse.ch) | IOC: IP:port, โดเมน, URL ของ C2 |
-| **URLhaus** (urlhaus.abuse.ch) | URL/โฮสต์แจกมัลแวร์ |
-| **YARAify / YARAhub** (yaraify.abuse.ch) | กฎ YARA ชุมชนที่เผยแพร่แล้ว |
-| **Neo23x0/signature-base**, **Elastic protections-artifacts**, **ReversingLabs yara** (GitHub) | กฎ YARA คุณภาพสูง |
-| **Malpedia** (malpedia.caad.fkie.fraunhofer.de) | รายงาน/ข้อมูลตระกูล XWorm |
-| **MITRE ATT&CK**, **CISA/ผู้ให้บริการความปลอดภัย** | เทคนิคการฝังตัว/คำแนะนำ |
-| **Any.run / Hybrid Analysis / VirusTotal** (รายงานสาธารณะ/API) | พฤติกรรม, mutex, strings, config ของ XWorm |
-**ข้อควรระวัง**: อย่าดาวน์โหลด/รันตัวอย่างมัลแวร์บนเครื่องหลัก ถ้าจะวิเคราะห์ต้องใช้ VM แยก ไม่มีเครือข่ายร่วม และเริ่มจากรายงาน/IOC/กฎที่เผยแพร่แล้วก่อนเสมอ
-
-## 13. Prompt ตัวอย่างสำหรับ Copilot
-- "อ่าน PROJECT_SPEC.md แล้วเพิ่มเทสต์ UI ด้วย Playwright ตาม §11 ข้อ 1 โดยไม่แก้พฤติกรรม API"
-- "เพิ่มการตรวจลายเซ็นดิจิทัลใน `analyze()` ตาม §11 ข้อ 2 พร้อม unittest ที่ mock `run`"
-- "ตรวจ `fetch_mb` ว่าทำไมได้แฮช 0 และเพิ่ม fallback ไปยัง export CSV ของ MalwareBazaar"
+- No real XWorm binaries or malware corpus are included; synthetic benchmark scores are not evidence of real-world detection rates.
+- Windows-specific process, registry, task, network and Defender integrations are mocked in the local test suite; they still need execution on representative Windows systems.
+- Flutter/Android/iOS toolchains are not installed in every developer environment; mobile CI is the verification path until local toolchains are available.
+- There is no production signing certificate, iOS provisioning profile, or mobile signing key configured.
+- Flutter SDK is pinned in CI, but `mobile/pubspec.lock` is not checked in; compatible Flutter packages can still resolve to newer versions on later builds.
+- Desktop scan history stores up to 30 runs and up to 100 finding details per run. Paths are local data; command text from PowerShell history is deliberately not copied into findings.
+- Cloud reputation, remote administration, real-time monitoring, enterprise policy, and other P3 ideas from the product specification require separate threat models and are not part of the current implementation.

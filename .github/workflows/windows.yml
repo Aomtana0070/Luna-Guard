@@ -20,16 +20,18 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
-          python-version: "3.12"
+          python-version: "3.14"
       - name: Install dependencies
-        run: python -m pip install --upgrade pip pywebview yara-python pyinstaller
+        run: python -m pip install -r requirements-build.txt
       - name: Run tests
-        run: python -m unittest -v test_luna
+        run: python -m unittest -v test_luna test_security
       - name: Build desktop executable
-        run: pyinstaller --clean --onefile --noconsole --uac-admin --icon "logo/Luna_Guard.ico" --name LunaGuard --collect-all webview --add-data "dashboard.html;." --add-data "locales.json;." --add-data "logo/Luna_Guard.png;logo" --add-data "luna_rules.yar;." luna_app.py
+        run: pyinstaller --clean --onefile --noconsole --uac-admin --icon "logo/Luna_Guard.ico" --name LunaGuard --distpath dist/release --collect-all webview --add-data "dashboard.html;." --add-data "locales.json;." --add-data "logo/Luna_Guard.png;logo" --add-data "luna_rules.yar;." --add-data "rules;rules" --add-data "malware_knowledge.json;." luna_app.py
+      - name: Record executable checksum and build provenance
+        run: python scripts/record_build.py dist/release/LunaGuard.exe
       - name: Upload executable artifact
         uses: actions/upload-artifact@v4
         with:
           name: LunaGuard-Windows
-          path: dist/LunaGuard.exe
+          path: dist/release/*
           if-no-files-found: error

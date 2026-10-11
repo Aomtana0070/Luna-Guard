@@ -1,6 +1,7 @@
 """36 test cases ของ Luna Guard  (รัน: python -m unittest -v test_luna)
 ส่วนที่เป็นคำสั่ง Windows (netstat/schtasks/ipconfig/registry) จำลองผลลัพธ์ด้วย mock - ไฟล์/แฮช/YARA/กักกัน/ฐานข้อมูลทดสอบจริง"""
 import argparse, contextlib, hashlib, io, json, os, struct, sys, tempfile, threading, unittest, zipfile
+import urllib.parse
 from pathlib import Path
 from unittest import mock
 from urllib.error import HTTPError
@@ -28,7 +29,7 @@ class FakeReg:
         def __exit__(s, *a): pass
     @classmethod
     def OpenKey(c, h, sub, r=0, a=0):
-        if (h, sub) not in c.data: raise OSError
+        if (h, sub) not in c.data: raise FileNotFoundError
         return c.K(c.data[(h, sub)])
     @staticmethod
     def EnumValue(k, i):
@@ -39,11 +40,12 @@ class FakeReg:
     def DeleteValue(k, n): del k.d[n]
 
 
-def fake_run(cmd):
+def fake_run(cmd, **kwargs):
     CMDS.append(cmd); c = cmd[0].lower()
     return {"netstat": OUT["netstat"], "ipconfig": OUT["dns"], "powershell": OUT["procs"]}.get(c, OUT["sch"] if c == "schtasks" and cmd[1] == "/query" else "")
 
 
+REAL_RUN = lg.run
 lg.run, lg.winreg = fake_run, FakeReg
 RUNKEY = ("HKCU", r"Software\Microsoft\Windows\CurrentVersion\Run")
 
@@ -153,7 +155,7 @@ class T(unittest.TestCase):
         def post(payload):
             request = Request(
                 base, data=json.dumps(payload).encode("utf-8"),
-                headers={"X-T": dashboard.TOKEN, "Content-Type": "application/json"},
+                headers={"X-Luna-Token": dashboard.TOKEN, "Content-Type": "application/json"},
                 method="POST",
             )
             try:
@@ -192,6 +194,17 @@ class T(unittest.TestCase):
             server.server_close()
             thread.join(timeout=5)
 
+    def test42_stale_scan_result_cannot_quarantine_or_allow_replaced_file(self):
+        path = TMP / "changed-after-scan.exe"
+        path.write_bytes(XW)
+        scan()
+        path.write_bytes(b"MZ" + b"B" * 300)
+        with self.assertRaises(SystemExit):
+            lg.remove_finding(str(path))
+        with self.assertRaises(SystemExit):
+            lg.allow_file(str(path))
+        self.assertTrue(path.exists())
+
     def test05_powershell_loader_is_medium_not_cleaned(self):
         f = TMP / "l.ps1"; f.write_bytes(b'x.DownloadString("http://a");[Convert]::FromBase64String($a);-WindowStyle Hidden')
         _, r = scan(clean=True); self.assertEqual(sev(r, "ไฟล์"), ["medium"]); self.assertTrue(f.exists())
@@ -202,7 +215,7 @@ class T(unittest.TestCase):
         _, r = scan(); self.assertEqual(len(sev(r, "PowerShell")), 3)
 
     def test07_c2_connection(self):
-        con = lg.db(); con.execute("INSERT OR REPLACE INTO iocs VALUES('45.67.89.10','ip','XWorm','test')"); con.commit(); con.close()
+        con = lg.db(); lg.record_ioc(con, "45.67.89.10", "ip", "XWorm", "test"); con.commit(); con.close()
         OUT["netstat"] = "  TCP    10.0.0.5:50123    45.67.89.10:7000    ESTABLISHED    4321\n  TCP    10.0.0.5:50124    8.8.8.8:443    ESTABLISHED    999\n"
         _, r = scan(); self.assertEqual(sev(r, "เครือข่าย"), ["high"])
 
@@ -213,21 +226,32 @@ class T(unittest.TestCase):
 
     def test09_update_from_abuse_ch(self):
         def fake_http(url, data=None, headers=None, timeout=0):
-            self.assertEqual((headers or {}).get("Auth-Key"), "test-key")
-            if "mb-api" in url: return json.dumps({"query_status": "ok", "data": [{"sha256_hash": "AB" * 32}]}).encode()
+            if "mb-api" in url:
+                self.assertEqual((headers or {}).get("Auth-Key"), "test-key")
+                query = urllib.parse.parse_qs(data.decode()) if data else {}
+                if query.get("query") == ["recent_detections"]:
+                    self.assertEqual(query.get("hours"), ["168"])
+                    return json.dumps({"query_status": "ok", "data": [
+                        {"sha256_hash": "EF" * 32, "signature": "RecentFamily"},
+                    ]}).encode()
+                return json.dumps({"query_status": "ok", "data": [{"sha256_hash": "AB" * 32}]}).encode()
             if "threatfox" in url:
+                self.assertEqual((headers or {}).get("Auth-Key"), "test-key")
                 self.assertEqual(json.loads(data)["query"], "get_iocs")
                 return json.dumps({"query_status": "ok", "data": [
                     {"ioc": "1.2.3.4:7000", "ioc_type": "ip:port",
                      "malware_samples": [{"sha256_hash": "CD" * 32}]},
                     {"ioc": "http://c2.example/x", "ioc_type": "url", "malware": "win.other"},
                 ]}).encode()
+            self.assertNotIn("Auth-Key", headers or {})  # URLhaus is a separate public feed; don't disclose abuse.ch credentials
             return b"# c\n127.0.0.1\tbad.example\n"
         old, lg.http = lg.http, fake_http
         with contextlib.redirect_stdout(io.StringIO()): lg.cmd_update()
         lg.http = old; con = lg.db()
         self.assertEqual(con.execute("SELECT COUNT(*) FROM hashes WHERE sha256=?", ("ab" * 32,)).fetchone()[0], 1)
         self.assertEqual(con.execute("SELECT COUNT(*) FROM hashes WHERE sha256=?", ("cd" * 32,)).fetchone()[0], 1)
+        self.assertEqual(con.execute("SELECT family,source FROM hashes WHERE sha256=?", ("ef" * 32,)).fetchone(),
+                         ("RecentFamily", "MalwareBazaar recent detections"))
         for v in ("1.2.3.4", "c2.example", "bad.example"): self.assertEqual(con.execute("SELECT COUNT(*) FROM iocs WHERE value=?", (v,)).fetchone()[0], 1)
         con.close()
 
@@ -272,11 +296,11 @@ class T(unittest.TestCase):
 
     def test15_stop_button(self):
         for n in "abc": (TMP / f"{n}.exe").write_bytes(b"MZ" + n.encode() * 200)
-        real = lg.analyze
+        real = lg.analyze_detailed
         def stopper(path, con): lg.STOP["flag"] = True; return real(path, con)
-        lg.analyze = stopper
+        lg.analyze_detailed = stopper
         try: out, _ = scan()
-        finally: lg.analyze = real
+        finally: lg.analyze_detailed = real
         self.assertIn("หยุดสแกนไฟล์", out); self.assertIn("รวมตรวจ 1 ไฟล์", out)
 
     def test16_scan_history_persists_details_and_last_result(self):
@@ -347,6 +371,30 @@ class T(unittest.TestCase):
         self.assertIn("ทุกแหล่งข้อมูลล้มเหลว", out.getvalue())
         con.close()
 
+    def test41_rejected_abusech_key_reports_partial_update(self):
+        def rejected(url, data=None, headers=None, timeout=0):
+            if "urlhaus" in url:
+                self.assertNotIn("Auth-Key", headers or {})
+                return b"# hostfile\n"
+            error = HTTPError(url, 403, "Forbidden", {}, io.BytesIO())
+            error.close()
+            raise error
+        old = lg.http
+        lg.http = rejected
+        try:
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                result = lg.cmd_update()
+        finally:
+            lg.http = old
+        self.assertFalse(result)
+        self.assertIn("ผู้ให้บริการปฏิเสธ Auth-Key", out.getvalue())
+        self.assertIn("อัปเดตฐานข้อมูลบางส่วน", out.getvalue())
+        self.assertNotIn("test-key", out.getvalue())
+        con = lg.db()
+        self.assertEqual(con.execute("SELECT v FROM meta WHERE k='last_update_complete'").fetchone()[0], "0")
+        con.close()
+
     def test20_missing_webview_does_not_launch_browser_or_server(self):
         with mock.patch.object(app, "load_webview", return_value=None), \
                 mock.patch.object(app, "show_dependency_error") as show_error, \
@@ -387,15 +435,15 @@ class T(unittest.TestCase):
         thread = threading.Thread(target=server.serve_forever, daemon=True)
         thread.start()
         try:
-            page_url = f"http://127.0.0.1:{server.server_address[1]}/?t={dashboard.TOKEN}"
+            page_url = f"http://127.0.0.1:{server.server_address[1]}/"
             with urlopen(page_url, timeout=5) as response:
                 page = response.read().decode("utf-8")
             self.assertIn('id="brandLogo"', page)
             self.assertIn(".brand-logo{width:52px;height:52px", page)
             self.assertIn('width="52" height="52"', page)
-            self.assertIn("logo.src='/logo/Luna_Guard.png?t='+encodeURIComponent(T||'')", page)
-            self.assertNotIn('src="/logo/Luna_Guard.png"', page)
-            url = f"http://127.0.0.1:{server.server_address[1]}/logo/Luna_Guard.png?t={dashboard.TOKEN}"
+            self.assertIn("logo.src='/logo/Luna_Guard.png'", page)
+            self.assertIn('const T='+json.dumps(dashboard.TOKEN), page)
+            url = f"http://127.0.0.1:{server.server_address[1]}/logo/Luna_Guard.png"
             with urlopen(url, timeout=5) as response:
                 self.assertEqual(response.headers.get_content_type(), "image/png")
                 self.assertEqual(response.read(), expected)
@@ -457,7 +505,7 @@ class T(unittest.TestCase):
         zero_block = bytes(1024 * 1024)
         with zipfile.ZipFile(archive_path, "w", zipfile.ZIP_DEFLATED) as archive:
             with archive.open("large.ps1", "w") as member:
-                for _ in range(257):
+                for _ in range(3):
                     member.write(zero_block)
 
         created = []
@@ -470,9 +518,13 @@ class T(unittest.TestCase):
             return temporary_file
 
         with mock.patch.object(lg.tempfile, "NamedTemporaryFile", side_effect=tracked_temporary_file), \
-                mock.patch.object(lg, "yara_scan_file", return_value=[]):
+                mock.patch.object(lg, "yara_scan_file", return_value=[]), \
+                mock.patch.object(lg, "MAX_ARCHIVE_MEMBER_BYTES", 8 * 1024 * 1024), \
+                mock.patch.object(lg, "MAX_ARCHIVE_EXPANDED_BYTES", 2 * 1024 * 1024), \
+                mock.patch.object(lg, "MAX_ARCHIVE_COMPRESSION_RATIO", 100000):
             _, result = scan()
-        self.assertTrue(result["complete"])
+        self.assertFalse(result["complete"], "expanded data beyond the cap must mark the scan incomplete")
+        self.assertGreater(result["issues"], 0)
         self.assertTrue(created)
         self.assertTrue(all(not temporary_file.exists() for temporary_file in created))
 

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Luna Guard - ตัวตรวจจับและกำจัด XWorm + มัลแวร์ที่แฝงมากับกลโกง "MrBeast"
-สำหรับ Windows (Python 3.9+, ไม่ต้องติดตั้งไลบรารีเพิ่ม)
+สำหรับ Windows (Python 3.10+, YARA เป็น optional dependency)
 
 คำสั่ง:
   python luna_guard.py update              ดึงฐานข้อมูลภัยคุกคามล่าสุด (abuse.ch)
@@ -14,34 +14,45 @@ Luna Guard - ตัวตรวจจับและกำจัด XWorm + ม�
   python luna_guard.py schedule            แสดงคำสั่งตั้งอัปเดตอัตโนมัติทุกวัน
 
 คีย์ abuse.ch (ฟรี): สมัครที่ https://auth.abuse.ch แล้วตั้งผ่านปุ่ม "ตั้งค่าคีย์" ใน GUI
-หรือ  setx ABUSECH_KEY "คีย์ของคุณ"  (เปิด Command Prompt ใหม่หลังตั้ง)
+Settings จะใช้คีย์ที่บันทึกไว้ก่อน; ใช้ setx ABUSECH_KEY "คีย์ของคุณ" เป็นทางเลือกเมื่อไม่มีคีย์ใน Settings
 """
 import argparse
+from collections import Counter
 import csv
 import datetime as dt
 import hashlib
 import ipaddress
 import io
 import json
+import math
+import mimetypes
 import os
 import re
 import shutil
 import sqlite3
+import struct
 import subprocess
 import sys
 import tempfile
 import time
+import uuid
 import urllib.parse
 import urllib.error
 import urllib.request
 import zipfile
 import zlib
 from pathlib import Path
+import luna_quarantine as lq
+import luna_audit
 
 try:
     import winreg  # Windows เท่านั้น
 except ImportError:
     winreg = None
+try:
+    import pefile
+except ImportError:
+    pefile = None
 
 IS_WIN = os.name == "nt"
 APP_DIR = Path(os.environ.get("LOCALAPPDATA", str(Path.home()))) / "LunaGuard"
@@ -49,6 +60,12 @@ DB_PATH = APP_DIR / "threats.db"
 QUAR_DIR = APP_DIR / "quarantine"
 QUAR_INDEX = QUAR_DIR / "index.json"
 ARCHIVE_EXT = {".zip", ".jar", ".docx", ".docm", ".xlsx", ".xlsm", ".pptx", ".pptm", ".apk"}
+MAX_ARCHIVE_MEMBERS = 10000
+MAX_ARCHIVE_MEMBER_BYTES = 256 * 1024 * 1024
+MAX_ARCHIVE_EXPANDED_BYTES = 512 * 1024 * 1024
+MAX_ARCHIVE_NESTING_DEPTH = 8
+MAX_ARCHIVE_SCAN_SECONDS = 180
+MAX_ARCHIVE_COMPRESSION_RATIO = 1000
 TAGS = ["XWorm", "MrBeast"]  # แท็กที่ดึงจาก MalwareBazaar / ThreatFox
 
 # โดเมนหลอกลวงที่รู้จัก (เพิ่มเองได้ด้วยการแก้ลิสต์นี้)
@@ -81,14 +98,205 @@ def db():
     con = sqlite3.connect(DB_PATH)
     con.executescript("""
         CREATE TABLE IF NOT EXISTS hashes(sha256 TEXT PRIMARY KEY, family TEXT, source TEXT);
+        CREATE TABLE IF NOT EXISTS malware_hashes(
+            sha256 TEXT PRIMARY KEY, sha1 TEXT, md5 TEXT, family TEXT NOT NULL,
+            threat_name TEXT NOT NULL, severity TEXT NOT NULL DEFAULT 'HIGH',
+            first_seen TEXT NOT NULL, last_seen TEXT NOT NULL, source TEXT NOT NULL,
+            confidence INTEGER NOT NULL DEFAULT 100, reference TEXT
+        );
+        CREATE INDEX IF NOT EXISTS malware_hashes_sha1 ON malware_hashes(sha1);
+        CREATE INDEX IF NOT EXISTS malware_hashes_md5 ON malware_hashes(md5);
+        CREATE TABLE IF NOT EXISTS malware_hash_sources(
+            sha256 TEXT NOT NULL, source TEXT NOT NULL, first_seen TEXT NOT NULL,
+            last_seen TEXT NOT NULL, confidence INTEGER NOT NULL DEFAULT 50, reference TEXT,
+            PRIMARY KEY(sha256,source)
+        );
+        CREATE TABLE IF NOT EXISTS threat_iocs(
+            kind TEXT NOT NULL, value TEXT NOT NULL, source TEXT NOT NULL,
+            family TEXT NOT NULL DEFAULT 'unknown', threat_name TEXT NOT NULL DEFAULT 'unknown',
+            confidence INTEGER NOT NULL DEFAULT 50, first_seen TEXT NOT NULL, last_seen TEXT NOT NULL,
+            expires_at TEXT, state TEXT NOT NULL DEFAULT 'active', reference TEXT,
+            PRIMARY KEY(kind,value,source)
+        );
+        CREATE INDEX IF NOT EXISTS threat_iocs_lookup ON threat_iocs(kind,value,state);
         CREATE TABLE IF NOT EXISTS iocs(value TEXT PRIMARY KEY, kind TEXT, family TEXT, source TEXT);
+        CREATE TABLE IF NOT EXISTS ioc_lifecycle(
+            value TEXT PRIMARY KEY, state TEXT NOT NULL DEFAULT 'active',
+            first_seen TEXT NOT NULL, last_seen TEXT NOT NULL, expires_at TEXT,
+            confidence INTEGER, reference TEXT, FOREIGN KEY(value) REFERENCES iocs(value) ON DELETE CASCADE
+        );
         CREATE TABLE IF NOT EXISTS meta(k TEXT PRIMARY KEY, v TEXT);
         CREATE TABLE IF NOT EXISTS allow(sha256 TEXT PRIMARY KEY, path TEXT);
     """)
+    now = dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds")
     for d in SEED_DOMAINS:
         con.execute("INSERT OR IGNORE INTO iocs VALUES(?,?,?,?)", (d, "domain", "MrBeast-scam", "seed"))
+    # Backfill old installations without changing their IOC table or contents.
+    con.execute("""INSERT OR IGNORE INTO ioc_lifecycle(value,state,first_seen,last_seen,expires_at)
+        SELECT value,CASE WHEN source='seed' THEN 'active' ELSE 'expired' END,?,?,
+        CASE WHEN source='seed' THEN NULL ELSE '2000-01-01T00:00:00+00:00' END FROM iocs""", (now, now))
+    con.execute("UPDATE ioc_lifecycle SET state='expired' WHERE state='active' AND expires_at IS NOT NULL AND expires_at<=?", (now,))
+    # Preserve each IOC source independently and migrate prior single-source rows.
+    con.execute("""INSERT OR IGNORE INTO threat_iocs
+        (kind,value,source,family,threat_name,confidence,first_seen,last_seen,expires_at,state,reference)
+        SELECT i.kind,i.value,i.source,i.family,i.family,COALESCE(l.confidence,50),
+        l.first_seen,l.last_seen,l.expires_at,l.state,l.reference
+        FROM iocs i JOIN ioc_lifecycle l ON l.value=i.value""")
+    con.execute("UPDATE threat_iocs SET state='stale' WHERE state='active' AND expires_at IS NOT NULL AND expires_at<=?", (now,))
+    stale_cutoff = (dt.datetime.now(dt.timezone.utc) - dt.timedelta(days=30)).isoformat(timespec="seconds")
+    con.execute("UPDATE threat_iocs SET state='expired' WHERE state='stale' AND expires_at IS NOT NULL AND expires_at<=?", (stale_cutoff,))
+    # Preserve historical SHA-256 entries and make them queryable through the richer schema.
+    con.execute("""INSERT OR IGNORE INTO malware_hashes
+        (sha256,sha1,md5,family,threat_name,severity,first_seen,last_seen,source,confidence)
+        SELECT sha256,NULL,NULL,COALESCE(NULLIF(family,''),'unknown'),
+        COALESCE(NULLIF(family,''),'unknown'),'HIGH',?,?,COALESCE(NULLIF(source,''),'legacy'),100
+        FROM hashes""", (now, now))
+    con.execute("""INSERT OR IGNORE INTO malware_hash_sources
+        (sha256,source,first_seen,last_seen,confidence)
+        SELECT sha256,COALESCE(NULLIF(source,''),'legacy'),?, ?,100 FROM hashes""", (now, now))
     con.commit()
     return con
+
+
+def _feed_time(value, fallback=None):
+    if not value:
+        return fallback or dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds")
+    try:
+        parsed = dt.datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=dt.timezone.utc)
+        return parsed.astimezone(dt.timezone.utc).isoformat(timespec="seconds")
+    except (TypeError, ValueError, OverflowError):
+        return fallback or dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds")
+
+
+def record_malware_hash(con, *, sha256=None, sha1=None, md5=None, family="unknown",
+                        threat_name=None, severity="HIGH", first_seen=None, last_seen=None,
+                        source="unknown", confidence=100, reference=None):
+    """Store known-malicious file digests with provenance while maintaining the legacy table."""
+    values = {"sha256": sha256, "sha1": sha1, "md5": md5}
+    lengths = {"sha256": 64, "sha1": 40, "md5": 32}
+    for name, value in list(values.items()):
+        if value is not None:
+            value = str(value).strip().lower()
+            if not re.fullmatch(rf"[0-9a-f]{{{lengths[name]}}}", value):
+                values[name] = None
+            else:
+                values[name] = value
+    if not any(values.values()):
+        return False
+    now = dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds")
+    first = _feed_time(first_seen, now)
+    last = _feed_time(last_seen, first)
+    family = str(family or "unknown")[:100]
+    threat_name = str(threat_name or family)[:160]
+    source = str(source or "unknown")[:160]
+    try:
+        confidence = max(0, min(100, int(confidence)))
+    except (TypeError, ValueError):
+        confidence = 50
+    severity = str(severity or "HIGH").upper()
+    if severity not in {"LOW", "MEDIUM", "HIGH", "CRITICAL", "UNKNOWN"}:
+        severity = "HIGH"
+    if values["sha256"]:
+        con.execute("""INSERT INTO malware_hashes
+            (sha256,sha1,md5,family,threat_name,severity,first_seen,last_seen,source,confidence,reference)
+            VALUES(?,?,?,?,?,?,?,?,?,?,?)
+            ON CONFLICT(sha256) DO UPDATE SET
+              sha1=COALESCE(excluded.sha1,malware_hashes.sha1),
+              md5=COALESCE(excluded.md5,malware_hashes.md5),
+              family=CASE WHEN excluded.family='unknown' THEN malware_hashes.family ELSE excluded.family END,
+              threat_name=CASE WHEN excluded.threat_name='unknown' THEN malware_hashes.threat_name ELSE excluded.threat_name END,
+              severity=CASE WHEN excluded.severity='UNKNOWN' THEN malware_hashes.severity ELSE excluded.severity END,
+              first_seen=MIN(malware_hashes.first_seen,excluded.first_seen),
+              last_seen=MAX(malware_hashes.last_seen,excluded.last_seen),
+              confidence=MAX(malware_hashes.confidence,excluded.confidence),
+              reference=COALESCE(excluded.reference,malware_hashes.reference)""",
+                    (values["sha256"], values["sha1"], values["md5"], family, threat_name,
+                     severity, first, last, source, confidence,
+                     str(reference)[:2048] if reference else None))
+        con.execute("""INSERT INTO malware_hash_sources(sha256,source,first_seen,last_seen,confidence,reference)
+            VALUES(?,?,?,?,?,?) ON CONFLICT(sha256,source) DO UPDATE SET
+            first_seen=MIN(first_seen,excluded.first_seen),last_seen=MAX(last_seen,excluded.last_seen),
+            confidence=MAX(confidence,excluded.confidence),reference=COALESCE(excluded.reference,reference)""",
+            (values["sha256"], source, first, last, confidence,
+             str(reference)[:2048] if reference else None))
+        con.execute("INSERT OR IGNORE INTO hashes VALUES(?,?,?)", (values["sha256"], family, source))
+    if values["sha1"] or values["md5"]:
+        for algorithm in ("sha1", "md5"):
+            digest = values[algorithm]
+            if digest:
+                con.execute("""INSERT INTO threat_iocs
+                    (kind,value,source,family,threat_name,confidence,first_seen,last_seen,state,reference)
+                    VALUES(?,?,?,?,?,?,?,?,?,?)
+                    ON CONFLICT(kind,value,source) DO UPDATE SET last_seen=MAX(last_seen,excluded.last_seen),
+                    confidence=MAX(confidence,excluded.confidence), reference=COALESCE(excluded.reference,reference)""",
+                    (algorithm, digest, source, family, threat_name, confidence, first, last,
+                     "active", str(reference)[:2048] if reference else None))
+    return True
+
+
+def record_threat_ioc(con, kind, value, source, *, family="unknown", threat_name=None,
+                      confidence=50, first_seen=None, last_seen=None, expires_at=None,
+                      reference=None):
+    now = dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds")
+    first, last = _feed_time(first_seen, now), _feed_time(last_seen, now)
+    expires = _feed_time(expires_at) if expires_at else None
+    if not expires or expires > now:
+        state = "active"
+    elif dt.datetime.fromisoformat(expires) > dt.datetime.now(dt.timezone.utc) - dt.timedelta(days=30):
+        state = "stale"
+    else:
+        state = "expired"
+    try:
+        confidence = max(0, min(100, int(confidence)))
+    except (TypeError, ValueError):
+        confidence = 50
+    con.execute("""INSERT INTO threat_iocs
+        (kind,value,source,family,threat_name,confidence,first_seen,last_seen,expires_at,state,reference)
+        VALUES(?,?,?,?,?,?,?,?,?,?,?)
+        ON CONFLICT(kind,value,source) DO UPDATE SET
+          family=excluded.family,threat_name=excluded.threat_name,
+          confidence=MAX(threat_iocs.confidence,excluded.confidence),
+          first_seen=MIN(threat_iocs.first_seen,excluded.first_seen),
+          last_seen=MAX(threat_iocs.last_seen,excluded.last_seen),
+          expires_at=excluded.expires_at,state=excluded.state,
+          reference=COALESCE(excluded.reference,threat_iocs.reference)""",
+        (kind, value, str(source)[:160], str(family or "unknown")[:100],
+         str(threat_name or family or "unknown")[:160], confidence,
+         first, last, expires, state, str(reference)[:2048] if reference else None))
+
+
+def record_ioc(con, value, kind, family, source, *, last_seen=None, expires_at=None,
+               confidence=None, reference=None):
+    """Upsert an IOC and its lifecycle metadata; return True when newly added."""
+    existed = con.execute("SELECT 1 FROM iocs WHERE value=?", (value,)).fetchone() is not None
+    con.execute("INSERT OR REPLACE INTO iocs(value,kind,family,source) VALUES(?,?,?,?)",
+                (value, kind, family, source))
+    now = dt.datetime.now(dt.timezone.utc)
+    seen = last_seen or now.isoformat(timespec="seconds")
+    old = con.execute("SELECT first_seen FROM ioc_lifecycle WHERE value=?", (value,)).fetchone()
+    first_seen = old[0] if old else seen
+    expiry = expires_at
+    state = "expired" if expiry and expiry <= now.isoformat(timespec="seconds") else "active"
+    con.execute("""INSERT OR REPLACE INTO ioc_lifecycle
+        (value,state,first_seen,last_seen,expires_at,confidence,reference)
+        VALUES(?,?,?,?,?,?,?)""",
+        (value, state, first_seen, seen, expiry,
+         confidence if isinstance(confidence, int) else None,
+         str(reference)[:2048] if reference else None))
+    record_threat_ioc(con, kind, value, source, family=family,
+        confidence=confidence if confidence is not None else 50,
+        first_seen=seen, last_seen=seen, expires_at=expires_at, reference=reference)
+    return not existed
+
+
+def ioc_is_active(con, value, kind):
+    now = dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds")
+    con.execute("UPDATE ioc_lifecycle SET state='expired' WHERE value=? AND state='active' AND expires_at IS NOT NULL AND expires_at<=?", (value, now))
+    return con.execute("""SELECT 1 FROM iocs i JOIN ioc_lifecycle l ON l.value=i.value
+        WHERE i.value=? AND i.kind=? AND l.state='active'
+        AND (l.expires_at IS NULL OR l.expires_at>?)""", (value, kind, now)).fetchone() is not None
 
 
 def http(url, data=None, headers=None, timeout=90):
@@ -119,19 +327,31 @@ SKIP_DIRS = {"cache", "code cache", "gpucache", "node_modules", ".git", "__pycac
 
 
 def get_key():
-    """คีย์ abuse.ch: อ่านจาก env ก่อน ถ้าไม่มีอ่านจาก config.json (ตั้งผ่าน GUI ได้)"""
-    k = os.environ.get("ABUSECH_KEY", "").strip()
-    if k:
-        return k
+    """Prefer the key saved in Settings; use ABUSECH_KEY only when no saved key exists."""
     try:
-        return json.loads(CONFIG.read_text(encoding="utf-8")).get("abusech_key", "").strip()
-    except Exception:
-        return ""
+        saved = json.loads(CONFIG.read_text(encoding="utf-8")).get("abusech_key", "").strip()
+        if saved:
+            return saved
+    except (OSError, ValueError, TypeError, AttributeError):
+        pass
+    return os.environ.get("ABUSECH_KEY", "").strip()
 
 
 def save_key(k):
+    if not isinstance(k, str) or len(k) > 512 or any(ord(char) < 32 for char in k):
+        raise ValueError("API key has an invalid format")
     APP_DIR.mkdir(parents=True, exist_ok=True)
-    CONFIG.write_text(json.dumps({"abusech_key": k.strip()}), encoding="utf-8")
+    fd, temp_name = tempfile.mkstemp(prefix="config-", suffix=".tmp", dir=APP_DIR)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as stream:
+            json.dump({"abusech_key": k.strip()}, stream, ensure_ascii=False)
+            stream.flush()
+            os.fsync(stream.fileno())
+        if os.name != "nt":
+            os.chmod(temp_name, 0o600)
+        Path(temp_name).replace(CONFIG)
+    finally:
+        Path(temp_name).unlink(missing_ok=True)
 
 
 _YARA = {"rules": None, "tried": False}
@@ -148,10 +368,12 @@ def yara_rules():
         return None
     files = {}
     base = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent))
-    for d in (base, APP_DIR / "rules"):
+    for f in sorted(base.glob("*.yar")):
+        files[f"root_{f.stem}"] = str(f)
+    for d in (base / "rules", APP_DIR / "rules"):
         if d.is_dir():
-            for f in d.glob("*.yar"):
-                files[f"{d.name}_{f.stem}"] = str(f)
+            for f in sorted(d.rglob("*.yar")):
+                files[f"{d.name}_{f.parent.name}_{f.stem}_{len(files)}"] = str(f)
     if not files:
         return None
     try:
@@ -166,11 +388,30 @@ def yara_scan_file(path):
     if not r:
         return []
     try:
-        return [{"rule": m.rule, "severity": m.meta.get("severity", "high")}
+        return [{"rule": m.rule, "severity": str(m.meta.get("severity", "high")).lower(),
+                 "family": m.meta.get("family", "unknown"),
+                 "category": m.meta.get("category", "unknown"),
+                 "threat_name": m.meta.get("threat_name", m.rule),
+                 "confidence": _safe_confidence(m.meta.get("confidence", 50)),
+                 "author": m.meta.get("author", "Unknown"),
+                 "description": m.meta.get("description", "No description supplied"),
+                 "source": m.meta.get("source", "Unknown; review required"),
+                 "reference": m.meta.get("reference", "No external reference"),
+                 "license": m.meta.get("license", "Unspecified; review before redistribution"),
+                 "rule_version": m.meta.get("rule_version", "unspecified"),
+                 "reviewed": m.meta.get("reviewed", "not independently reviewed"),
+                 "false_positive_notes": m.meta.get("false_positive_notes", "Not documented")}
                 for m in r.match(filepath=path, timeout=30)]
     except Exception as e:
         scan_issue(f"YARA ตรวจไฟล์ไม่สำเร็จ {path}: {e}")
         return []
+
+
+def _safe_confidence(value):
+    try:
+        return max(0, min(100, int(value)))
+    except (TypeError, ValueError):
+        return 50
 
 
 def yara_scan_process(pid):
@@ -207,6 +448,50 @@ def norm_ioc(ioc, kind):
     return ioc, "domain"
 
 
+def normalize_threat_ioc(value, kind):
+    """Normalize supported ThreatFox types while retaining source-specific URL/name IOCs."""
+    if not isinstance(value, str) or not value.strip() or any(ord(c) < 32 for c in value):
+        return None
+    value, raw_kind = value.strip(), str(kind or "").strip().lower().replace("-", "_")
+    aliases = {
+        "ip": "ip", "ipv4": "ip", "ipv6": "ip", "ip:port": "ip:port",
+        "domain": "domain", "url": "url", "sha256": "sha256", "sha256_hash": "sha256",
+        "sha1": "sha1", "sha1_hash": "sha1", "md5": "md5", "md5_hash": "md5",
+        "filename": "filename", "file_name": "filename",
+    }
+    normalized_kind = aliases.get(raw_kind)
+    if not normalized_kind:
+        return None
+    value = value.strip().lower()
+    if normalized_kind in ("sha256", "sha1", "md5"):
+        length = {"sha256": 64, "sha1": 40, "md5": 32}[normalized_kind]
+        return (normalized_kind, value) if re.fullmatch(rf"[0-9a-f]{{{length}}}", value) else None
+    if normalized_kind in ("ip", "ip:port"):
+        normalized_value, actual_kind = norm_ioc(value, normalized_kind)
+        return (actual_kind, normalized_value) if normalized_value else None
+    if normalized_kind == "domain":
+        normalized_value, actual_kind = norm_ioc(value, "domain")
+        return (actual_kind, normalized_value) if normalized_value else None
+    if normalized_kind == "url":
+        try:
+            parsed = urllib.parse.urlsplit(value)
+            if parsed.scheme not in ("http", "https") or not parsed.hostname or parsed.username or parsed.password:
+                return None
+            host = parsed.hostname.encode("idna").decode("ascii").lower()
+            port = f":{parsed.port}" if parsed.port else ""
+            path = urllib.parse.quote(urllib.parse.unquote(parsed.path or "/"), safe="/%:@!$&'()*+,;=-._~")
+            query = f"?{parsed.query}" if parsed.query else ""
+            canonical = f"{parsed.scheme}://{host}{port}{path}{query}"
+            return ("url", canonical[:2048])
+        except (ValueError, UnicodeError):
+            return None
+    if normalized_kind == "filename":
+        if len(value) > 255 or "/" in value or "\\" in value or value in (".", ".."):
+            return None
+        return ("filename", value)
+    return None
+
+
 def feed_rows(data):
     """Normalize supported abuse.ch JSON row containers without treating strings as records."""
     if isinstance(data, list):
@@ -233,6 +518,14 @@ def update_http(url, data=None, headers=None):
     raise RuntimeError("abuse.ch request failed after retries")
 
 
+def feed_error(source, error):
+    """Report provider authentication failures without exposing request headers or credentials."""
+    code = getattr(error, "code", None)
+    if code in (401, 403):
+        return f"{source}: HTTP {code} — ผู้ให้บริการปฏิเสธ Auth-Key; ตรวจว่าคีย์จาก https://auth.abuse.ch ถูกต้องและบันทึกใน Settings แล้วลองอีกครั้ง"
+    return f"{source}: เรียกไม่สำเร็จ - {error}"
+
+
 def fetch_mb(con, tag, hdr):
     """ดึงแฮชจาก MalwareBazaar ทั้งแบบ tag (ตัวพิมพ์ต่าง ๆ) และแบบ signature พร้อมรายงานสถานะทุกครั้ง"""
     added, successful = 0, False
@@ -241,7 +534,7 @@ def fetch_mb(con, tag, hdr):
             body = urllib.parse.urlencode({"query": q, k: v, "limit": 1000}).encode()
             res = json.loads(update_http("https://mb-api.abuse.ch/api/v1/", body, hdr))
         except (OSError, ValueError) as e:
-            print(f"[!] MalwareBazaar {q} {v}: เรียกไม่สำเร็จ - {e}")
+            print(f"[!] {feed_error(f'MalwareBazaar {q} {v}', e)}")
             continue
         if not isinstance(res, dict):
             print(f"[!] MalwareBazaar {q} {v}: รูปแบบคำตอบไม่ถูกต้อง")
@@ -251,7 +544,11 @@ def fetch_mb(con, tag, hdr):
         for row in rows:
             sha = str(row.get("sha256_hash", "")).lower()
             if re.fullmatch(r"[0-9a-f]{64}", sha):
-                got += con.execute("INSERT OR IGNORE INTO hashes VALUES(?,?,?)", (sha, tag, "MalwareBazaar")).rowcount
+                got += con.execute("SELECT 1 FROM hashes WHERE sha256=?", (sha,)).fetchone() is None
+                record_malware_hash(con, sha256=sha, sha1=row.get("sha1_hash"), md5=row.get("md5_hash"),
+                    family=row.get("signature") or tag, threat_name=row.get("file_name") or row.get("signature") or tag,
+                    first_seen=row.get("first_seen"), last_seen=row.get("last_seen") or row.get("first_seen"),
+                    source="MalwareBazaar", reference="https://bazaar.abuse.ch/")
         st = str(res.get("query_status", "unknown")).lower()
         successful |= st in ("ok", "no_results", "no_result")
         print(f"[{'+' if st in ('ok', 'no_results', 'no_result') else '!'}] "
@@ -260,20 +557,62 @@ def fetch_mb(con, tag, hdr):
     return added, successful
 
 
+def fetch_mb_recent(con, hdr):
+    """Import recent MalwareBazaar SHA-256 detections without downloading samples."""
+    body = urllib.parse.urlencode({"query": "recent_detections", "hours": 168}).encode()
+    try:
+        res = json.loads(update_http("https://mb-api.abuse.ch/api/v1/", body, hdr))
+    except (OSError, ValueError) as e:
+        print(f"[!] {feed_error('MalwareBazaar recent detections', e)}")
+        return 0, False
+    if not isinstance(res, dict):
+        print("[!] MalwareBazaar recent detections: รูปแบบคำตอบไม่ถูกต้อง")
+        return 0, False
+    status = str(res.get("query_status", "unknown")).lower()
+    if status not in ("ok", "no_results", "no_result"):
+        print(f"[!] MalwareBazaar recent detections: สถานะ={status}")
+        return 0, False
+    rows = feed_rows(res.get("data"))
+    added = 0
+    for row in rows:
+        sha = str(row.get("sha256_hash", "")).lower()
+        if re.fullmatch(r"[0-9a-f]{64}", sha):
+            family = str(row.get("signature") or "unknown")[:100]
+            added += con.execute("SELECT 1 FROM hashes WHERE sha256=?", (sha,)).fetchone() is None
+            record_malware_hash(con, sha256=sha, sha1=row.get("sha1_hash"), md5=row.get("md5_hash"),
+                family=family, threat_name=row.get("file_name") or family,
+                first_seen=row.get("first_seen"), last_seen=row.get("last_seen") or row.get("first_seen"),
+                source="MalwareBazaar recent detections", reference="https://bazaar.abuse.ch/api/")
+    print(f"[+] MalwareBazaar recent detections: พบ {len(rows)} รายการ (ใหม่ {added})")
+    return added, True
+
+
 def cmd_update(_args=None):
     key = get_key()
     hdr = {"Auth-Key": key} if key else {}
     con = db()
     added_h = added_i = 0
-    successful_sources = []
+    successful_sources, failed_sources = [], []
     if not key:
-        print("[!] ยังไม่ได้ตั้ง ABUSECH_KEY - abuse.ch ต้องใช้คีย์ (ฟรี) ที่ https://auth.abuse.ch")
-    for tag in TAGS:
-        new_hashes, ok = fetch_mb(con, tag, hdr)  # MalwareBazaar: แฮชของไฟล์
-        added_h += new_hashes
-        if ok and "MalwareBazaar" not in successful_sources:
-            successful_sources.append("MalwareBazaar")
+        print("[!] ยังไม่ได้ตั้ง Auth-Key — ข้าม MalwareBazaar และ ThreatFox (รับคีย์ฟรีได้ที่ https://auth.abuse.ch)")
+        failed_sources.extend(["MalwareBazaar", "MalwareBazaar recent detections", "ThreatFox"])
+    else:
+        for tag in TAGS:
+            new_hashes, ok = fetch_mb(con, tag, hdr)  # MalwareBazaar: แฮชของไฟล์
+            added_h += new_hashes
+            if ok and "MalwareBazaar" not in successful_sources:
+                successful_sources.append("MalwareBazaar")
+        if "MalwareBazaar" not in successful_sources:
+            failed_sources.append("MalwareBazaar")
+        recent_hashes, recent_ok = fetch_mb_recent(con, hdr)
+        added_h += recent_hashes
+        if recent_ok:
+            successful_sources.append("MalwareBazaar recent detections")
+        else:
+            failed_sources.append("MalwareBazaar recent detections")
     try:  # ThreatFox: IOC ล่าสุดทั้งหมด และแฮชที่เชื่อมโยงกับ IOC
+        if not key:
+            raise StopIteration
         body = json.dumps({"query": "get_iocs", "days": 7}).encode()
         res = json.loads(update_http("https://threatfox-api.abuse.ch/api/v1/", body,
                                      {**hdr, "Content-Type": "application/json"}))
@@ -285,53 +624,96 @@ def cmd_update(_args=None):
             successful_sources.append("ThreatFox")
             for row in rows:
                 val, kind = norm_ioc(row.get("ioc", ""), row.get("ioc_type", ""))
+                family = str(row.get("malware_printable") or row.get("malware") or "unknown")[:100]
+                raw_seen = row.get("last_seen") or row.get("first_seen")
+                seen = _feed_time(raw_seen)
+                seen_dt = dt.datetime.fromisoformat(seen)
+                expires = (seen_dt + dt.timedelta(days=7)).isoformat(timespec="seconds")
+                confidence = row.get("confidence_level")
+                try:
+                    confidence = int(confidence) if confidence is not None else None
+                except (TypeError, ValueError):
+                    confidence = None
                 if val:
-                    family = str(row.get("malware_printable") or row.get("malware") or "unknown")[:100]
-                    cur = con.execute("INSERT OR IGNORE INTO iocs VALUES(?,?,?,?)",
-                                      (val, kind, family, "ThreatFox"))
-                    added_i += cur.rowcount
+                    added_i += int(record_ioc(
+                        con, val, kind, family, "ThreatFox", last_seen=seen, expires_at=expires,
+                        confidence=confidence, reference=row.get("reference"),
+                    ))
+                canonical = normalize_threat_ioc(row.get("ioc", ""), row.get("ioc_type", ""))
+                if canonical:
+                    record_threat_ioc(con, canonical[0], canonical[1], "ThreatFox", family=family,
+                        confidence=confidence if confidence is not None else 50,
+                        first_seen=row.get("first_seen") or seen, last_seen=seen,
+                        expires_at=expires, reference=row.get("reference"))
+                    if canonical[0] == "sha256":
+                        record_malware_hash(con, sha256=canonical[1], family=family,
+                            threat_name=family, first_seen=row.get("first_seen") or seen,
+                            last_seen=seen, source="ThreatFox", confidence=confidence or 50,
+                            reference=row.get("reference"))
                 for sample in feed_rows(row.get("malware_samples")):
                     sha = str(sample.get("sha256_hash", "")).lower()
                     if re.fullmatch(r"[0-9a-f]{64}", sha):
-                        added_h += con.execute(
-                            "INSERT OR IGNORE INTO hashes VALUES(?,?,?)",
-                            (sha, str(row.get("malware_printable") or row.get("malware") or "ThreatFox")[:100],
-                             "ThreatFox"),
-                        ).rowcount
+                        added_h += con.execute("SELECT 1 FROM hashes WHERE sha256=?", (sha,)).fetchone() is None
+                        family = str(row.get("malware_printable") or row.get("malware") or "ThreatFox")[:100]
+                        record_malware_hash(con, sha256=sha, sha1=sample.get("sha1_hash"),
+                            md5=sample.get("md5_hash"), family=family, threat_name=family,
+                            first_seen=sample.get("first_seen") or seen, last_seen=seen,
+                            source="ThreatFox", reference=row.get("reference"))
+        else:
+            failed_sources.append("ThreatFox")
+            print(f"[!] ThreatFox: สถานะ={status} พบ {len(rows)} รายการ")
         print(f"[{'+' if status in ('ok', 'no_results', 'no_result') else '!'}] ThreatFox: "
               f"สถานะ={status} พบ {len(rows)} รายการ (เพิ่ม IOC/แฮชที่เชื่อมโยงแล้ว)")
     except (OSError, ValueError) as e:
-        print(f"[!] ThreatFox ล้มเหลว: {e}")
+        failed_sources.append("ThreatFox")
+        print(f"[!] {feed_error('ThreatFox', e)}")
+    except StopIteration:
+        pass
     try:  # URLhaus: โฮสต์ที่กำลังแจกมัลแวร์หรือเพิ่มใน 48 ชั่วโมงล่าสุด
-        text = update_http("https://urlhaus.abuse.ch/downloads/hostfile/", headers=hdr).decode("utf-8", "ignore")
+        text = update_http("https://urlhaus.abuse.ch/downloads/hostfile/").decode("utf-8", "ignore")
         got = 0
         for line in text.splitlines():
             parts = line.split()
             if len(parts) >= 2 and not line.startswith("#"):
                 val, kind = norm_ioc(parts[1], "domain")
                 if val:
-                    got += con.execute("INSERT OR IGNORE INTO iocs VALUES(?,?,?,?)",
-                                       (val, kind, "URLhaus", "URLhaus")).rowcount
+                    now = dt.datetime.now(dt.timezone.utc)
+                    got += int(record_ioc(
+                        con, val, kind, "URLhaus", "URLhaus",
+                        last_seen=now.isoformat(timespec="seconds"),
+                        expires_at=(now + dt.timedelta(hours=48)).isoformat(timespec="seconds"),
+                    ))
+                    record_threat_ioc(con, kind, val, "URLhaus", family="malware distribution",
+                        confidence=85, last_seen=now.isoformat(timespec="seconds"),
+                        expires_at=(now + dt.timedelta(hours=48)).isoformat(timespec="seconds"),
+                        reference="https://urlhaus.abuse.ch/")
         added_i += got
         successful_sources.append("URLhaus")
         print(f"[+] URLhaus: เพิ่มโดเมน {got} จาก host feed")
     except (OSError, ValueError) as e:
-        print(f"[!] URLhaus ล้มเหลว: {e}")
+        failed_sources.append("URLhaus")
+        print(f"[!] {feed_error('URLhaus', e)}")
     if successful_sources:
         con.execute("INSERT OR REPLACE INTO meta VALUES('last_update',?)",
                     (dt.datetime.now().isoformat(timespec="seconds"),))
     else:
         print("[!] ทุกแหล่งข้อมูลล้มเหลว - ไม่เปลี่ยนเวลาอัปเดตล่าสุด")
+    con.execute("INSERT OR REPLACE INTO meta VALUES('last_update_complete',?)",
+                 ("1" if successful_sources and not failed_sources else "0",))
     con.commit()
     th = con.execute("SELECT COUNT(*) FROM hashes").fetchone()[0]
     ti = con.execute("SELECT COUNT(*) FROM iocs").fetchone()[0]
-    if successful_sources:
+    if successful_sources and not failed_sources:
         print(f"[+] อัปเดตฐานข้อมูลสำเร็จ ({', '.join(successful_sources)}): "
               f"เพิ่มแฮช {added_h}, IOC {added_i} | รวม แฮช {th}, IOC {ti}")
+    elif successful_sources:
+        print(f"[!] อัปเดตฐานข้อมูลบางส่วน ({', '.join(successful_sources)}): "
+              f"เพิ่มแฮช {added_h}, IOC {added_i} | แหล่งที่ยังไม่สำเร็จ: {', '.join(failed_sources)}")
     else:
         print(f"[!] อัปเดตฐานข้อมูลไม่สำเร็จ: ทุกแหล่งล้มเหลว | "
               f"แฮช {th}, IOC {ti} (คงข้อมูลเดิมไว้)")
     con.close()
+    return bool(successful_sources) and not failed_sources
 
 
 def cmd_add_hash(args):
@@ -353,6 +735,21 @@ def sha256_of(path):
     return h.hexdigest()
 
 
+def malware_family_info(family):
+    """Load the small, local family knowledge base; return no untrusted rich content."""
+    name = str(family or "unknown")[:100]
+    roots = [Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent)), APP_DIR]
+    for root in roots:
+        try:
+            data = json.loads((root / "malware_knowledge.json").read_text(encoding="utf-8"))
+            for key, value in data.items():
+                if key.casefold() == name.casefold() and isinstance(value, dict):
+                    return value
+        except (OSError, ValueError, AttributeError):
+            continue
+    return {}
+
+
 def user_writable(p):
     p = p.lower().replace("/", "\\")
     return any(s in p for s in ("\\appdata\\", "\\temp\\", "\\programdata\\", "\\users\\public\\", "\\downloads\\"))
@@ -364,20 +761,20 @@ def in_windows_dir(p):
 
 
 def classify_analysis(path, sha, con, matches, is_pe, strong_xworm, weak_xworm, dotnet):
-    row = con.execute("SELECT family FROM hashes WHERE sha256=?", (sha,)).fetchone()
+    row = con.execute("SELECT family,source FROM hashes WHERE sha256=?", (sha,)).fetchone()
     if row:
-        return "high", [f"แฮชตรงกับมัลแวร์ที่รู้จัก ({row[0]})"], sha
+        return "high", [f"SHA-256 reputation: family={row[0]}, source={row[1]}"], sha
     if con.execute("SELECT 1 FROM allow WHERE sha256=?", (sha,)).fetchone():  # ผู้ใช้ยืนยันว่าปลอดภัย (แฮชในฐานข้อมูลมัลแวร์ชนะเสมอ)
         return None, [], sha
     ext = Path(path).suffix.lower()
-    if ext not in SCRIPT_EXT:
+    if ext not in SCRIPT_EXT and not is_pe:
         return None, [], sha
     ywhy = [
-        f"YARA: {m['rule']} — พบรูปแบบ XWorm หลายตัวบ่งชี้"
-        if m["rule"] == "LunaGuard_XWorm_Strong"
-        else f"YARA: {m['rule']} — พบคำว่า XWorm ร่วมกับตัวบ่งชี้ .NET (ยังไม่ยืนยันว่าเป็นมัลแวร์)"
-        if m["rule"] == "LunaGuard_XWorm_Weak"
-        else f"YARA: {m['rule']}"
+        f"YARA: {m['rule']} — {m.get('description', 'No description supplied')}; "
+        f"author: {m.get('author', 'unknown')}; source/reference: {m.get('source', 'unknown')} / {m.get('reference', 'none')}; "
+        f"license: {m.get('license', 'unspecified')}; version: {m.get('rule_version', 'unspecified')}; "
+        f"review: {m.get('reviewed', 'not reviewed')}; "
+        f"false-positive notes: {m.get('false_positive_notes', 'not documented')}"
         for m in matches
     ]
     rk = {"high": 3, "medium": 2, "low": 1}
@@ -410,8 +807,10 @@ def classify_analysis(path, sha, con, matches, is_pe, strong_xworm, weak_xworm, 
 
 
 def inspect_file_stream(path):
-    """Hash arbitrary-size files and collect only the small heuristic markers in one pass."""
-    digest = hashlib.sha256()
+    """Hash arbitrary-size files and measure entropy/heuristic markers in one pass."""
+    digests = {name: hashlib.new(name) for name in ("sha256", "sha1", "md5")}
+    histogram = Counter()
+    total_bytes = 0
     strong_patterns = [
         pattern.lower()
         for pat in STRONG_PATTERNS
@@ -430,7 +829,10 @@ def inspect_file_stream(path):
     prefix = b""
     with open(path, "rb") as stream:
         while chunk := stream.read(1024 * 1024):
-            digest.update(chunk)
+            for digest in digests.values():
+                digest.update(chunk)
+            total_bytes += len(chunk)
+            histogram.update(chunk)
             if len(prefix) < 2:
                 prefix += chunk[:2 - len(prefix)]
             data = (carry + chunk).lower()
@@ -441,54 +843,184 @@ def inspect_file_stream(path):
     strong_count = len(strong_patterns)
     dotnet_start = len(patterns) - 2
     return (
-        digest.hexdigest(),
+        {name: digest.hexdigest() for name, digest in digests.items()},
         prefix,
         any(i < strong_count for i in found),
         any(strong_count <= i < dotnet_start for i in found),
         dotnet_start in found and dotnet_start + 1 in found,
+        -sum((count / total_bytes) * math.log2(count / total_bytes)
+             for count in histogram.values()) if total_bytes else 0.0,
     )
 
 
-def analyze(path, con, logical_path=None):
+def _hash_reputation(con, digests):
+    row = con.execute("SELECT sha256,sha1,md5,family,threat_name,severity,source,confidence,reference FROM malware_hashes WHERE sha256=? OR (? IS NOT NULL AND sha1=?) OR (? IS NOT NULL AND md5=?)",
+                      (digests["sha256"], digests["sha1"], digests["sha1"], digests["md5"], digests["md5"])).fetchone()
+    if row:
+        return {"algorithm": "sha256" if row[0] == digests["sha256"] else "sha1" if row[1] == digests["sha1"] else "md5",
+                "family": row[3], "threat_name": row[4], "severity": row[5],
+                "source": row[6], "confidence": row[7], "reference": row[8]}
+    for algorithm in ("sha1", "md5"):
+        row = con.execute("SELECT family,threat_name,source,confidence,reference FROM threat_iocs WHERE kind=? AND value=? AND state='active' ORDER BY confidence DESC LIMIT 1",
+                          (algorithm, digests[algorithm])).fetchone()
+        if row:
+            return {"algorithm": algorithm, "family": row[0], "threat_name": row[1],
+                    "severity": "HIGH", "source": row[2], "confidence": row[3], "reference": row[4]}
+    row = con.execute("SELECT family,source FROM hashes WHERE sha256=?", (digests["sha256"],)).fetchone()
+    if row:
+        return {"algorithm": "sha256", "family": row[0], "threat_name": row[0],
+                "severity": "HIGH", "source": row[1], "confidence": 100, "reference": None}
+    return None
+
+
+def analyze_detailed(path, con, logical_path=None):
     """Analyze files of any size without loading the entire file into memory."""
     display_path = logical_path or path
     try:
         size = os.path.getsize(path)
-        if size < 64:
-            return None, [], ""
-        with open(path, "rb") as fh:
-            prefix = fh.read(2)
-        if Path(display_path).suffix.lower() not in SCRIPT_EXT and prefix != b"MZ":
-            return None, [], ""
-        sha, prefix, strong_xworm, weak_xworm, dotnet = inspect_file_stream(path)
+        if size == 0:
+            return None, [], "", {"size": 0}
+        digests, prefix, strong_xworm, weak_xworm, dotnet, entropy = inspect_file_stream(path)
     except OSError as e:
         scan_issue(f"อ่านไฟล์ไม่สำเร็จ {display_path}: {e}")
-        return None, [], ""
-    is_pe = prefix == b"MZ"
-    row = con.execute("SELECT family FROM hashes WHERE sha256=?", (sha,)).fetchone()
-    if row:
-        return "high", [f"แฮชตรงกับมัลแวร์ที่รู้จัก ({row[0]})"], sha
+        return None, [], "", {}
+    sha = digests["sha256"]
+    metadata = {"sha256": sha, "sha1": digests["sha1"], "md5": digests["md5"],
+                "size": size, "file_type": "PE executable" if prefix == b"MZ" else (mimetypes.guess_type(display_path)[0] or "unknown"),
+                "entropy": round(entropy, 3)}
+    if prefix == b"MZ":
+        metadata["signature"] = "unknown (PE metadata unavailable)"
+    reputation = _hash_reputation(con, digests)
+    if reputation:
+        metadata["hash_reputation"] = reputation
+        metadata["family_intel"] = malware_family_info(reputation["family"])
+        metadata["risk_score"] = 100
+        metadata["risk_band"] = "CRITICAL"
+        metadata["score_type"] = "risk score; not probability"
+        return "high", [f"{reputation['algorithm'].upper()} reputation: {reputation['threat_name']} ({reputation['source']})"], sha, metadata
     if con.execute("SELECT 1 FROM allow WHERE sha256=?", (sha,)).fetchone():
-        return None, [], sha
-    return classify_analysis(
+        return None, [], sha, metadata
+    is_pe = prefix == b"MZ"
+    if is_pe and size <= 32 * 1024 * 1024 and pefile:
+        try:
+            pe = pefile.PE(path, fast_load=True)
+            metadata["architecture"] = {0x14c: "x86", 0x8664: "x64", 0xaa64: "ARM64"}.get(pe.FILE_HEADER.Machine, f"unknown (0x{pe.FILE_HEADER.Machine:04x})")
+            stamp = pe.FILE_HEADER.TimeDateStamp
+            metadata["compile_timestamp"] = dt.datetime.fromtimestamp(stamp, dt.timezone.utc).isoformat() if stamp else None
+            metadata["signature"] = "signed (authenticity not verified)" if pe.OPTIONAL_HEADER.DATA_DIRECTORY[4].VirtualAddress else "unsigned"
+            metadata["version_info"] = {}
+            for item in getattr(pe, "FileInfo", []) or []:
+                for table in getattr(item, "StringTable", []) or []:
+                    for key, value in table.entries.items():
+                        if key.decode("utf-8", "replace") in {"CompanyName", "FileDescription", "FileVersion", "ProductName", "ProductVersion"}:
+                            metadata["version_info"][key.decode("utf-8", "replace")] = value.decode("utf-8", "replace")[:256]
+            metadata["sections"] = [{"name": section.Name.rstrip(b"\\0").decode("ascii", "replace"), "entropy": round(section.get_entropy(), 3)} for section in pe.sections[:32]]
+            metadata["imports"] = []
+            pe.parse_data_directories(directories=[
+                pefile.DIRECTORY_ENTRY["IMAGE_DIRECTORY_ENTRY_IMPORT"],
+                pefile.DIRECTORY_ENTRY["IMAGE_DIRECTORY_ENTRY_RESOURCE"],
+            ])
+            for entry in getattr(pe, "DIRECTORY_ENTRY_IMPORT", [])[:64]:
+                metadata["imports"].append({"dll": entry.dll.decode("ascii", "replace"), "functions": [imp.name.decode("ascii", "replace") for imp in entry.imports[:32] if imp.name]})
+            pe.close()
+        except Exception as exc:
+            metadata["pe_analysis"] = f"unavailable: {type(exc).__name__}"
+    matches = yara_scan_file(path) if Path(display_path).suffix.lower() in SCRIPT_EXT or is_pe else []
+    classified = classify_analysis(
         display_path, sha, con,
-        yara_scan_file(path) if Path(display_path).suffix.lower() in SCRIPT_EXT else [],
+        matches,
         is_pe, strong_xworm, weak_xworm, dotnet,
     )
+    severity, reasons, _ = classified
+    if matches:
+        metadata["yara_matches"] = matches
+        family = next((m.get("family") for m in matches if m.get("family") not in (None, "", "unknown")), None)
+        if family:
+            metadata["family_intel"] = malware_family_info(family)
+    score = 0
+    if matches:
+        score = max((80 if m.get("severity") == "high" else
+                     50 if m.get("severity") == "medium" else 25)
+                    for m in matches)
+    elif severity == "high":
+        score = 60 if strong_xworm else 70
+    elif severity == "medium":
+        score = 30
+    elif severity == "low":
+        score = 20
+    if is_pe and metadata.get("signature", "").startswith("unsigned"):
+        score += 15
+    if not severity and size > 0:
+        score += 5
+    score = min(100, score)
+    metadata["risk_score"] = score
+    metadata["risk_band"] = "CRITICAL" if score >= 90 else "HIGH" if score >= 70 else "MEDIUM" if score >= 40 else "LOW" if score else "CLEAN / UNKNOWN"
+    metadata["score_type"] = "risk score; not probability"
+    return severity, reasons, sha, metadata
+
+
+def analyze(path, con, logical_path=None):
+    severity, reasons, sha, _metadata = analyze_detailed(path, con, logical_path)
+    return severity, reasons, sha
 
 
 def scan_archive(path, con):
-    """Stream inspectable ZIP members through disk-backed temporary files."""
+    """Stream inspectable ZIP members with explicit time, depth, count and disk budgets."""
     findings = []
     archive_stack = []
     container = str(path)
+    members_seen = 0
+    expanded_bytes = 0
+    started_at = time.monotonic()
+    limit_hit = False
+    member_bytes = 0
+
+    def archive_entry_count(source):
+        # Inspect the small end record before ZipFile builds its in-memory list.
+        with open(source, "rb") as stream:
+            end_record = zipfile._EndRecData(stream)
+        if end_record is None:
+            raise zipfile.BadZipFile("missing ZIP end record")
+        return int(end_record[zipfile._ECD_ENTRIES_TOTAL])
+
+    def read_member(member, amount, label):
+        nonlocal expanded_bytes, member_bytes, limit_hit
+        if time.monotonic() - started_at >= MAX_ARCHIVE_SCAN_SECONDS:
+            scan_issue(f"หยุดตรวจ archive เมื่อเกินเวลาที่กำหนด: {label}")
+            limit_hit = True
+            return None
+        chunk = member.read(amount)
+        if not chunk:
+            return b""
+        member_bytes += len(chunk)
+        expanded_bytes += len(chunk)
+        if member_bytes > MAX_ARCHIVE_MEMBER_BYTES:
+            scan_issue(f"ข้ามสมาชิก archive ที่เกินขนาดต่อไฟล์: {label}")
+            limit_hit = True
+            return None
+        if expanded_bytes > MAX_ARCHIVE_EXPANDED_BYTES:
+            scan_issue(f"หยุดตรวจ archive เมื่อข้อมูลคลายบีบอัดรวมเกินขีดจำกัด: {label}")
+            limit_hit = True
+            return None
+        if time.monotonic() - started_at >= MAX_ARCHIVE_SCAN_SECONDS:
+            scan_issue(f"หยุดตรวจ archive เมื่อเกินเวลาที่กำหนด: {label}")
+            limit_hit = True
+            return None
+        return chunk
 
     def push_archive(source, label, temporary_path=None):
         archive = None
+        SCAN_AUDIT.setdefault("archive", {"archives": 0, "members_seen": 0, "expanded_bytes": 0})["archives"] += 1
         try:
+            entry_count = archive_entry_count(source)
+            if members_seen + entry_count > MAX_ARCHIVE_MEMBERS:
+                scan_issue(f"ข้าม archive ที่จำนวนสมาชิกเกินขีดจำกัด: {label}")
+                if temporary_path:
+                    remove_temporary(temporary_path, label)
+                return
             archive = zipfile.ZipFile(source)
             entries = iter(archive.infolist())
-        except (OSError, RuntimeError, zipfile.BadZipFile, EOFError) as e:
+        except (OSError, RuntimeError, zipfile.BadZipFile, EOFError, IndexError, struct.error, ValueError) as e:
             if archive:
                 close_archive(archive, label)
             scan_issue(f"อ่าน archive ไม่สำเร็จ {label}: {e}")
@@ -522,6 +1054,10 @@ def scan_archive(path, con):
         while archive_stack:
             if STOP["flag"]:
                 break
+            if time.monotonic() - started_at >= MAX_ARCHIVE_SCAN_SECONDS:
+                scan_issue(f"หยุดตรวจ archive เมื่อเกินเวลาที่กำหนด: {archive_stack[-1]['label']}")
+                limit_hit = True
+                break
             frame = archive_stack[-1]
             try:
                 info = next(frame["entries"])
@@ -533,23 +1069,44 @@ def scan_archive(path, con):
                 close_frame(archive_stack.pop())
                 continue
             if info.is_dir():
+                members_seen += 1
                 continue
+            members_seen += 1
+            if members_seen > MAX_ARCHIVE_MEMBERS:
+                scan_issue(f"หยุดตรวจ archive เมื่อจำนวนสมาชิกเกินขีดจำกัด: {frame['label']}")
+                limit_hit = True
+                break
             target = f"{frame['label']}!{info.filename}"
             if info.flag_bits & 0x1:
                 scan_issue(f"ข้ามไฟล์ใน archive ที่เข้ารหัสไว้: {target}")
+                continue
+            if info.file_size > MAX_ARCHIVE_MEMBER_BYTES:
+                scan_issue(f"ข้ามสมาชิก archive ที่เกินขนาดต่อไฟล์: {target}")
+                continue
+            if info.file_size > 1024 * 1024 and info.compress_size > 0 and (
+                info.file_size / info.compress_size > MAX_ARCHIVE_COMPRESSION_RATIO
+            ):
+                scan_issue(f"ข้ามสมาชิก archive ที่มีอัตราขยายสูงผิดปกติ: {target}")
                 continue
             suffix = Path(info.filename).suffix.lower()
             is_script = suffix in SCRIPT_EXT
             is_archive = suffix in ARCHIVE_EXT
             member_temp_path = None
+            member_bytes = 0
             try:
                 with frame["archive"].open(info) as member:
-                    prefix = member.read(4)
+                    prefix = read_member(member, 4, target)
+                    if prefix is None:
+                        break
                     is_nested_zip = prefix.startswith((b"PK\x03\x04", b"PK\x05\x06", b"PK\x07\x08"))
                     if not (is_script or is_archive or prefix[:2] == b"MZ" or is_nested_zip):
-                        while member.read(1024 * 1024) and not STOP["flag"]:
-                            pass
-                        if STOP["flag"]:
+                        while not STOP["flag"] and not limit_hit:
+                            chunk = read_member(member, 1024 * 1024, target)
+                            if chunk is None:
+                                break
+                            if not chunk:
+                                break
+                        if STOP["flag"] or limit_hit:
                             break
                         continue
                     with tempfile.NamedTemporaryFile(
@@ -557,22 +1114,31 @@ def scan_archive(path, con):
                     ) as extracted:
                         member_temp_path = extracted.name
                         extracted.write(prefix)
-                        while chunk := member.read(1024 * 1024):
-                            if STOP["flag"]:
+                        while not STOP["flag"] and not limit_hit:
+                            chunk = read_member(member, 1024 * 1024, target)
+                            if chunk is None:
+                                break
+                            if not chunk:
                                 break
                             extracted.write(chunk)
-                if STOP["flag"]:
+                if STOP["flag"] or limit_hit:
                     break
                 if is_script or prefix[:2] == b"MZ":
-                    severity, reasons, _ = analyze(member_temp_path, con, logical_path=info.filename)
+                    severity, reasons, _, metadata = analyze_detailed(member_temp_path, con, logical_path=info.filename)
                     if severity:
                         findings.append({
                             "sev": severity, "kind": "Archive member", "target": target,
                             "why": "; ".join(reasons), "container": container,
+                            "analysis": metadata, "sha256": metadata.get("sha256"),
+                            "risk_score": metadata.get("risk_score", 0),
+                            "risk_band": metadata.get("risk_band", "CLEAN / UNKNOWN"),
                         })
                 if is_archive or is_nested_zip:
-                    push_archive(member_temp_path, target, member_temp_path)
-                    member_temp_path = None
+                    if len(archive_stack) >= MAX_ARCHIVE_NESTING_DEPTH:
+                        scan_issue(f"ข้าม archive ซ้อนที่เกินความลึกสูงสุด: {target}")
+                    else:
+                        push_archive(member_temp_path, target, member_temp_path)
+                        member_temp_path = None
             except (OSError, RuntimeError, zipfile.BadZipFile, EOFError, NotImplementedError, zlib.error) as e:
                 scan_issue(f"อ่านหรือจัดเก็บไฟล์ใน archive ไม่สำเร็จ {target}: {e}")
             finally:
@@ -581,16 +1147,32 @@ def scan_archive(path, con):
     finally:
         while archive_stack:
             close_frame(archive_stack.pop())
+        archive_stats = SCAN_AUDIT.setdefault("archive", {"archives": 0, "members_seen": 0, "expanded_bytes": 0})
+        archive_stats["members_seen"] += members_seen
+        archive_stats["expanded_bytes"] += expanded_bytes
     return findings
 
 
 # ---------------------------------------------------------------- ตัวเก็บข้อมูลระบบ
-def run(cmd):
+def run(cmd, *, required=False):
     try:
-        return subprocess.run(cmd, capture_output=True, text=True, timeout=120, errors="ignore",
-                              stdin=subprocess.DEVNULL, creationflags=0x08000000 if IS_WIN else 0).stdout
-    except Exception:
-        return ""
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=120, errors="ignore",
+                               stdin=subprocess.DEVNULL, creationflags=0x08000000 if IS_WIN else 0)
+        if result.returncode:
+            message = f"คำสั่ง {Path(cmd[0]).name} จบด้วยรหัส {result.returncode}"
+            if required:
+                scan_issue(message)
+            else:
+                print(f"[!] {message}")
+            return None
+        return result.stdout
+    except (OSError, subprocess.SubprocessError) as error:
+        message = f"เรียกคำสั่ง {Path(cmd[0]).name} ไม่สำเร็จ ({type(error).__name__})"
+        if required:
+            scan_issue(message)
+        else:
+            print(f"[!] {message}")
+        return None
 
 
 def default_scan_dirs():
@@ -640,7 +1222,9 @@ def walk_files(roots):
 
 def list_processes():
     out = run(["powershell", "-NoProfile", "-Command",
-               "Get-CimInstance Win32_Process | Select ProcessId,Name,ExecutablePath | ConvertTo-Json -Depth 2"])
+               "Get-CimInstance Win32_Process | Select ProcessId,Name,ExecutablePath | ConvertTo-Json -Depth 2"], required=True)
+    if out is None:
+        return []
     try:
         data = json.loads(out)
         processes = data if isinstance(data, list) else [data]
@@ -713,13 +1297,24 @@ def registry_run_entries():
             (winreg.HKEY_LOCAL_MACHINE, r"Software\Microsoft\Windows\CurrentVersion\RunOnce", "HKLM")]
     for hive, sub, label in keys:
         try:
-            with winreg.OpenKey(hive, sub) as k:
+            key = winreg.OpenKey(hive, sub)
+        except FileNotFoundError:
+            continue
+        except OSError as error:
+            scan_issue(f"เปิด Registry key ไม่สำเร็จ ({type(error).__name__})")
+            continue
+        try:
+            with key as k:
                 i = 0
                 while True:
-                    name, val, _ = winreg.EnumValue(k, i)
+                    try:
+                        name, val, _ = winreg.EnumValue(k, i)
+                    except OSError:
+                        break
                     i += 1
                     yield hive, sub, label, name, str(val)
-        except OSError:
+        except OSError as error:
+            scan_issue(f"อ่าน Registry key ไม่สำเร็จ ({type(error).__name__})")
             continue
 
 
@@ -729,7 +1324,9 @@ def extract_path(text):
 
 
 def scheduled_tasks():
-    out = run(["schtasks", "/query", "/fo", "csv", "/v"])
+    out = run(["schtasks", "/query", "/fo", "csv", "/v"], required=True)
+    if out is None:
+        return
     for row in csv.reader(io.StringIO(out)):
         if len(row) > 8 and row[1].startswith("\\"):
             for cell in row:
@@ -741,29 +1338,45 @@ def scheduled_tasks():
 
 def network_hits(con):
     hits = []
-    out = run(["netstat", "-ano", "-p", "tcp"])
+    out = run(["netstat", "-ano", "-p", "tcp"], required=True)
+    if out is None:
+        return hits
     for line in out.splitlines():
         parts = line.split()
         if len(parts) >= 5 and parts[3] == "ESTABLISHED":
-            ip = parts[2].rsplit(":", 1)[0]
-            row = con.execute("SELECT family,source FROM iocs WHERE value=? AND kind='ip'", (ip,)).fetchone()
-            if row:
-                hits.append((int(parts[4]), ip, row[0]))
+            remote = parts[2]
+            ip = remote.rsplit(":", 1)[0].strip("[]")
+            rows = con.execute("SELECT family,source FROM threat_iocs WHERE value=? AND kind='ip' AND state='active' ORDER BY confidence DESC", (ip,)).fetchall()
+            if not rows:
+                rows = con.execute("SELECT family,source FROM iocs WHERE value=? AND kind='ip'", (ip,)).fetchall()
+                if rows and not ioc_is_active(con, ip, "ip"):
+                    rows = []
+            if rows:
+                hits.append((int(parts[4]), ip, rows[0][0]))
     return hits
 
 
 def dns_hits(con):
-    seen = set(re.findall(r"[a-z0-9][a-z0-9.-]+\.[a-z]{2,}", run(["ipconfig", "/displaydns"]).lower()))
+    dns_output = run(["ipconfig", "/displaydns"], required=True)
+    if dns_output is None:
+        return []
+    seen = set(re.findall(r"[a-z0-9][a-z0-9.-]+\.[a-z]{2,}", dns_output.lower()))
     hosts = Path(os.environ.get("WINDIR", r"C:\Windows")) / r"System32\drivers\etc\hosts"
     try:
         seen |= set(re.findall(r"[a-z0-9][a-z0-9.-]+\.[a-z]{2,}", hosts.read_text(errors="ignore").lower()))
-    except OSError:
+    except FileNotFoundError:
         pass
+    except OSError as error:
+        scan_issue(f"อ่านไฟล์ hosts ไม่สำเร็จ ({type(error).__name__})")
     found = []
     for d in seen:
-        row = con.execute("SELECT family,source FROM iocs WHERE value=? AND kind='domain'", (d,)).fetchone()
-        if row:
-            found.append((d, row[0], row[1]))
+        rows = con.execute("SELECT family,source FROM threat_iocs WHERE value=? AND kind='domain' AND state='active' ORDER BY confidence DESC", (d,)).fetchall()
+        if not rows:
+            row = con.execute("SELECT family,source FROM iocs WHERE value=? AND kind='domain'", (d,)).fetchone()
+            if row and ioc_is_active(con, d, "domain"):
+                rows = [row]
+        if rows:
+            found.append((d, rows[0][0], rows[0][1]))
     return found
 
 
@@ -776,28 +1389,32 @@ def powershell_history():
                 if re.search(rx, line, re.I):
                     res.append((n, desc, line.strip()[:140]))
                     break
-    except OSError:
+    except FileNotFoundError:
         pass
+    except OSError as error:
+        scan_issue(f"อ่าน PowerShell history ไม่สำเร็จ ({type(error).__name__})")
     return res
 
 
 # ---------------------------------------------------------------- กักกัน / กำจัด
 def load_index():
-    try:
-        return json.loads(QUAR_INDEX.read_text(encoding="utf-8"))
-    except Exception:
-        return {}
+    return lq.load_index(QUAR_INDEX)
 
 
 def quarantine_file(path, sha, why):
-    QUAR_DIR.mkdir(parents=True, exist_ok=True)
-    qid = f"{dt.datetime.now():%Y%m%d%H%M%S}_{sha[:8]}"
-    dest = QUAR_DIR / f"{qid}.quar"
-    shutil.move(path, dest)
-    idx = load_index()
-    idx[qid] = {"original": path, "sha256": sha, "why": why}
-    QUAR_INDEX.write_text(json.dumps(idx, indent=2, ensure_ascii=False), encoding="utf-8")
-    return qid
+    return lq.quarantine_file(path, sha, why, QUAR_DIR, QUAR_INDEX)
+
+
+def recover_quarantine():
+    return lq.recover_index(QUAR_DIR, QUAR_INDEX)
+
+
+def restore_file(item_id, destination=None):
+    return lq.restore_file(item_id, QUAR_DIR, QUAR_INDEX, destination)
+
+
+def delete_quarantined_file(item_id):
+    return lq.delete_file(item_id, QUAR_DIR, QUAR_INDEX)
 
 
 def cmd_quarantine(_args=None):
@@ -809,14 +1426,11 @@ def cmd_quarantine(_args=None):
 
 
 def cmd_restore(args):
-    idx = load_index()
-    v = idx.get(args.id)
-    if not v:
-        sys.exit("ไม่พบรหัสนี้")
-    shutil.move(QUAR_DIR / f"{args.id}.quar", v["original"])
-    del idx[args.id]
-    QUAR_INDEX.write_text(json.dumps(idx, indent=2, ensure_ascii=False), encoding="utf-8")
-    print(f"[+] กู้ไฟล์กลับไปที่ {v['original']}")
+    try:
+        target = restore_file(args.id, getattr(args, "destination", None))
+    except (KeyError, OSError, RuntimeError, ValueError) as error:
+        raise SystemExit(str(error)) from error
+    print(f"[+] กู้ไฟล์กลับไปที่ {target}")
 
 
 # ---------------------------------------------------------------- สแกนหลัก
@@ -832,7 +1446,15 @@ def cmd_scan(args):
     if files_only and getattr(args, "paths", None):
         raise SystemExit("โหมดสแกนไฟล์อัตโนมัติใช้เฉพาะโฟลเดอร์ที่กำหนดไว้")
     SCAN_AUDIT.clear()
-    SCAN_AUDIT.update(issues=0, details=[], memory={"attempted": 0, "scanned": 0, "denied": 0, "failed": 0})
+    SCAN_AUDIT.update(issues=0, details=[], files_analyzed=0, files_skipped=0,
+                      archive={"archives": 0, "members_seen": 0, "expanded_bytes": 0},
+                      memory={"attempted": 0, "scanned": 0, "denied": 0, "failed": 0})
+    scan_id = uuid.uuid4().hex
+    scan_started = dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds")
+    try:
+        luna_audit.record("scan.started", scan_id=scan_id)
+    except OSError:
+        print("[!] บันทึก scan audit ไม่สำเร็จ")
     if not IS_WIN:
         scan_issue("ไม่ใช่ Windows; การตรวจ process, registry และหน่วยความจำอาจไม่ครบ")
     con = db()
@@ -845,7 +1467,7 @@ def cmd_scan(args):
     roots = [r"C:\\"] if args.full else (
         default_scan_dirs() if files_only else (args.paths or default_scan_dirs())
     )
-    high_files, findings, archive_findings = {}, [], []
+    high_files, findings, archive_findings, file_hashes, file_metadata = {}, [], [], {}, {}
 
     stage_count = 1 if files_only else 5
     print(f"[1/{stage_count}] สแกนไฟล์ ({len(roots)} โฟลเดอร์)...")
@@ -862,13 +1484,31 @@ def cmd_scan(args):
             if time.time() - last >= 3:
                 last = time.time()
                 print(f"        … ตรวจแล้ว {count:,} ไฟล์ ({int(last - t0)} วิ) ตอนนี้: …{f[-80:]}")
-            sev, why, sha = analyze(f, con)
+            sev, why, sha, metadata = analyze_detailed(f, con)
+            if sha:
+                file_hashes[f] = sha
+                file_metadata[f] = metadata
+                SCAN_AUDIT["files_analyzed"] += 1
+            elif Path(f).suffix.lower() not in ARCHIVE_EXT:
+                SCAN_AUDIT["files_skipped"] += 1
             if sev:
                 findings.append((sev, "ไฟล์", f, why))
                 if sev == "high":
                     high_files[f] = (sha, why)
             if Path(f).suffix.lower() in ARCHIVE_EXT:
-                archive_findings.extend(scan_archive(f, con))
+                if not sha:
+                    try:
+                        sha = sha256_of(f)
+                        file_hashes[f] = sha
+                        SCAN_AUDIT["files_analyzed"] += 1
+                        SCAN_AUDIT["files_skipped"] = max(0, SCAN_AUDIT["files_skipped"] - 1)
+                    except OSError as error:
+                        scan_issue(f"คำนวณ SHA-256 ของ archive ไม่สำเร็จ ({type(error).__name__})")
+                        SCAN_AUDIT["files_skipped"] += 1
+                contained_findings = scan_archive(f, con)
+                for item in contained_findings:
+                    item["container_sha256"] = sha
+                archive_findings.extend(contained_findings)
         print(f"      ✔ จบ: {root} — {rc:,} ไฟล์ ใช้ {int(time.time() - rt)} วิ")
         if STOP["flag"]:
             print("[!] ผู้ใช้สั่งหยุดสแกนไฟล์ - ข้ามไปตรวจขั้นตอนที่เหลือ")
@@ -922,22 +1562,38 @@ def cmd_scan(args):
         PROGRESS.update(stage="[5/5] ตรวจประวัติ PowerShell", path="")
         print("[5/5] ตรวจประวัติ PowerShell...")
         for n, desc, line in powershell_history():
-            findings.append(("medium", "PowerShell", f"บรรทัด {n}: {line}", [desc]))
+            findings.append(("medium", "PowerShell", f"PowerShell history line {n}", [desc]))
 
     if STOP["flag"]:
         scan_issue("หยุดการสแกนก่อนตรวจครบทุกขั้นตอน")
     PROGRESS.clear()
-    saved_findings = [
-        {"sev": a, "kind": b, "target": c, "why": "; ".join(d)}
-        for a, b, c, d in findings
-    ] + archive_findings
+    saved_findings = []
+    for severity, kind, target, reasons in findings:
+        item = {"sev": severity, "kind": kind, "target": target, "why": "; ".join(reasons)}
+        if kind == "ไฟล์" and target in file_hashes:
+            item["sha256"] = file_hashes[target]
+            item["analysis"] = file_metadata.get(target, {})
+            item["risk_score"] = item["analysis"].get("risk_score", 0)
+            item["risk_band"] = item["analysis"].get("risk_band", "CLEAN / UNKNOWN")
+        saved_findings.append(item)
+    saved_findings.extend(archive_findings)
     LAST_SCAN.clear()
     LAST_SCAN.update(
-        time=dt.datetime.now().isoformat(timespec="seconds"), files=count, clean=clean,
+        scan_id=scan_id, started_at=scan_started,
+        time=dt.datetime.now().astimezone().isoformat(timespec="seconds"), files=count, clean=clean,
         scope="files" if files_only else "system",
         findings=saved_findings, complete=SCAN_AUDIT["issues"] == 0, issues=SCAN_AUDIT["issues"],
-        audit={"details": list(SCAN_AUDIT["details"]), "memory": dict(SCAN_AUDIT["memory"])},
+        audit={"details": list(SCAN_AUDIT["details"]), "memory": dict(SCAN_AUDIT["memory"]),
+               "files_analyzed": SCAN_AUDIT["files_analyzed"], "files_skipped": SCAN_AUDIT["files_skipped"],
+               "archive": dict(SCAN_AUDIT["archive"])},
     )
+    try:
+        luna_audit.record("scan.finished", scan_id=scan_id,
+                          result="complete" if LAST_SCAN["complete"] else "incomplete",
+                          files_scanned=str(count), files_analyzed=str(SCAN_AUDIT["files_analyzed"]),
+                          files_skipped=str(SCAN_AUDIT["files_skipped"]), issues=str(LAST_SCAN["issues"]))
+    except OSError:
+        print("[!] บันทึก scan audit ไม่สำเร็จ")
     totals = {level: sum(f["sev"] == level for f in saved_findings) for level in ("high", "medium", "low")}
     hist = []
     history_ok = True
@@ -951,6 +1607,7 @@ def cmd_scan(args):
             print(f"[!] อ่านประวัติการสแกนไม่สำเร็จ จึงไม่เขียนทับไฟล์เดิม: {e}")
     if history_ok:
         hist.append({
+            "scan_id": scan_id, "started_at": scan_started,
             "time": LAST_SCAN["time"], "files": count, "clean": clean, "scope": LAST_SCAN["scope"],
             "complete": LAST_SCAN["complete"], "issues": LAST_SCAN["issues"], "audit": LAST_SCAN["audit"],
             **totals, "findings_total": len(LAST_SCAN["findings"]),
@@ -977,6 +1634,7 @@ def cmd_scan(args):
         print(f"[{finding['sev'].upper():6}] {finding['kind']}: {finding['target']}\n"
               f"         เหตุผล: {finding['why']} (กักกันทั้ง archive ได้จากตารางผลสแกน)")
 
+    remediation_failures = 0
     if not clean:
         if high_files or bad_pids or bad_reg or bad_tasks:
             print("\nพบรายการ HIGH - รันซ้ำพร้อม --clean เพื่อกำจัด (กักกันไฟล์ ไม่ลบทิ้งทันที)")
@@ -985,8 +1643,10 @@ def cmd_scan(args):
         if archive_findings:
             print("[!] ผลตรวจพบภายใน archive จะแจ้งเตือนเท่านั้น; กักกันทั้ง archive ได้จากตารางผลสแกน")
         for pid, exe in bad_pids.items():
-            run(["taskkill", "/F", "/PID", str(pid)])
-            print(f"kill PID {pid}")
+            if run(["taskkill", "/F", "/PID", str(pid)]) is None:
+                remediation_failures += 1
+            else:
+                print(f"kill PID {pid}")
         for hive, sub, name in bad_reg:
             try:
                 with winreg.OpenKey(hive, sub, 0, winreg.KEY_SET_VALUE) as k:
@@ -994,17 +1654,28 @@ def cmd_scan(args):
                 print(f"ลบ Registry value: {name}")
             except OSError as e:
                 print(f"ลบ {name} ไม่สำเร็จ (ต้องรันแบบ Administrator?): {e}")
+                remediation_failures += 1
         for t in bad_tasks:
-            run(["schtasks", "/delete", "/tn", t, "/f"])
-            print(f"ลบ Scheduled Task: {t}")
+            if run(["schtasks", "/delete", "/tn", t, "/f"]) is None:
+                remediation_failures += 1
+            else:
+                print(f"ลบ Scheduled Task: {t}")
         for path, (sha, why) in high_files.items():
             try:
                 print(f"กักกัน {path} -> id {quarantine_file(path, sha, why)}")
-            except OSError as e:
-                print(f"กักกัน {path} ไม่สำเร็จ: {e}")
+            except (OSError, RuntimeError, ValueError) as e:
+                print(f"กักกัน {path} ไม่สำเร็จ ({type(e).__name__})")
+                remediation_failures += 1
         print("\nสำคัญ: ถ้าเคยติดจริง ให้เปลี่ยนรหัสผ่านทุกบัญชีจาก 'เครื่องอื่นที่สะอาด', เปิด 2FA, "
               "ออกจากระบบทุกอุปกรณ์ และเพิกถอน session ของ Discord/Google/Steam (มัลแวร์ขโมยรหัสไปแล้วก่อนถูกลบ)")
     con.close()
+    if clean:
+        try:
+            luna_audit.record("remediation.finished", scan_id=scan_id,
+                              result="complete" if remediation_failures == 0 else "partial")
+        except OSError:
+            print("[!] บันทึก remediation audit ไม่สำเร็จ")
+    return bool(LAST_SCAN["complete"] and remediation_failures == 0)
 
 
 def _ask_hook(args):
@@ -1023,7 +1694,12 @@ def remove_finding(path):
               or (item.get("kind") == "Archive member" and item.get("container") == path)), None)
     if not f:
         raise SystemExit("ไม่พบรายการนี้ในผลสแกนล่าสุด")
+    expected = f.get("container_sha256") if f.get("kind") == "Archive member" else f.get("sha256")
+    if not expected:
+        raise SystemExit("ผลสแกนไม่มี SHA-256 ที่ยืนยันได้ กรุณาสแกนไฟล์นี้อีกครั้ง")
     sha = sha256_of(path)
+    if sha.lower() != expected.lower():
+        raise SystemExit("ไฟล์เปลี่ยนหลังการสแกน กรุณาสแกนใหม่ก่อนกักกัน")
     for p in list_processes():
         if (p.get("ExecutablePath") or "").lower() == path.lower():
             run(["taskkill", "/F", "/PID", str(p["ProcessId"])])
@@ -1037,8 +1713,11 @@ def allow_file(path):
     f = _find(path)
     if not f:
         raise SystemExit("ไม่พบรายการนี้ในผลสแกนล่าสุด")
+    expected = f.get("sha256")
+    if not expected or sha256_of(path).lower() != expected.lower():
+        raise SystemExit("ไฟล์เปลี่ยนหลังการสแกน กรุณาสแกนใหม่ก่อนระบุว่าปลอดภัย")
     con = db()
-    con.execute("INSERT OR REPLACE INTO allow VALUES(?,?)", (sha256_of(path), path))
+    con.execute("INSERT OR REPLACE INTO allow VALUES(?,?)", (expected, path))
     con.commit()
     LAST_SCAN["findings"].remove(f)
     print(f"[+] ระบุว่าปลอดภัย: {path}")
@@ -1081,9 +1760,10 @@ def main():
     a.set_defaults(fn=cmd_add_hash)
     sub.add_parser("schedule").set_defaults(fn=cmd_schedule)
     args = ap.parse_args()
-    args.fn(args)
+    result = args.fn(args)
     _ask_hook(args)
+    return 1 if result is False else 0
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

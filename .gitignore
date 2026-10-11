@@ -11,7 +11,34 @@ config.json
 threats.db
 history.json
 quarantine/
-rules/
+rules/*
+!rules/README.md
+!rules/core/
+!rules/malware/
+!rules/ransomware/
+!rules/trojan/
+!rules/stealer/
+!rules/loader/
+!rules/community/
+rules/core/*
+!rules/core/*.yar
+rules/malware/*
+!rules/malware/*.yar
+!rules/malware/.gitkeep
+rules/ransomware/*
+!rules/ransomware/*.yar
+!rules/ransomware/.gitkeep
+rules/trojan/*
+!rules/trojan/*.yar
+!rules/trojan/.gitkeep
+rules/stealer/*
+!rules/stealer/*.yar
+!rules/stealer/.gitkeep
+rules/loader/*
+!rules/loader/*.yar
+!rules/loader/.gitkeep
+rules/community/*
+!rules/community/.gitkeep
 
 # Python and editor noise
 .pytest_cache/

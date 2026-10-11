@@ -25,9 +25,10 @@ def show_dependency_error():
 
 
 def serve():
+    d.check_quarantine_recovery()
     srv = ThreadingHTTPServer(("127.0.0.1", 0), d.H)  # พอร์ตสุ่ม ฟังเฉพาะในเครื่อง
     threading.Thread(target=srv.serve_forever, daemon=True).start()
-    return srv, f"http://127.0.0.1:{srv.server_address[1]}/?t={d.TOKEN}"
+    return srv, f"http://127.0.0.1:{srv.server_address[1]}/"
 
 
 def main():

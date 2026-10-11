@@ -4,8 +4,19 @@
 rule LunaGuard_XWorm_Strong
 {
     meta:
+        family = "XWorm"
+        category = "RAT"
+        threat_name = "XWorm"
+        confidence = 90
         description = "ไฟล์ .NET ที่มีตัวบ่งชี้เฉพาะของ XWorm RAT หลายรายการ"
         severity = "high"
+        author = "Luna Guard project"
+        source = "First-party heuristic; authored in this repository"
+        reference = ""
+        license = "Unspecified; review before redistribution"
+        rule_version = "1"
+        false_positive_notes = "Requires PE/.NET markers plus multiple XWorm-specific strings; independently review matches"
+        reviewed = "not independently reviewed"
     strings:
         $x1 = "<Xwormmm>" ascii wide nocase
         $x2 = "XWorm V" ascii wide nocase
@@ -19,8 +30,19 @@ rule LunaGuard_XWorm_Strong
 rule LunaGuard_XWorm_Weak
 {
     meta:
+        family = "XWorm"
+        category = "RAT"
+        threat_name = "Possible XWorm"
+        confidence = 55
         description = "ไฟล์ .NET ขนาดเล็กที่มีคำว่า XWorm (ควรตรวจเอง)"
         severity = "medium"
+        author = "Luna Guard project"
+        source = "First-party heuristic; authored in this repository"
+        reference = ""
+        license = "Unspecified; review before redistribution"
+        rule_version = "1"
+        false_positive_notes = "Generic family text with .NET markers; informational only"
+        reviewed = "not independently reviewed"
     strings:
         $x = "XWorm" ascii wide nocase
         $specific1 = "<Xwormmm>" ascii wide nocase
@@ -36,8 +58,19 @@ rule LunaGuard_XWorm_Weak
 rule LunaGuard_PowerShell_Loader
 {
     meta:
+        family = "script-loader"
+        category = "loader"
+        threat_name = "PowerShell loader behavior"
+        confidence = 65
         description = "สคริปต์ที่ดึงโค้ดจากเน็ต + ถอดรหัส base64 + ซ่อนหน้าต่าง (แพทเทิร์นแบบ loader)"
         severity = "medium"
+        author = "Luna Guard project"
+        source = "First-party heuristic; authored in this repository"
+        reference = ""
+        license = "Unspecified; review before redistribution"
+        rule_version = "1"
+        false_positive_notes = "Behavioral string combination can appear in administrative tooling"
+        reviewed = "not independently reviewed"
     strings:
         $dl = "DownloadString" ascii wide nocase
         $b64 = "FromBase64String" ascii wide nocase
@@ -52,8 +85,19 @@ rule LunaGuard_PowerShell_Loader
 rule LunaGuard_Hidden_PowerShell
 {
     meta:
+        family = "script"
+        category = "suspicious behavior"
+        threat_name = "Hidden PowerShell execution"
+        confidence = 30
         description = "สคริปต์ซ่อนหน้าต่าง + ข้าม ExecutionPolicy (ไม่แน่ชัด ให้ผู้ใช้ตัดสินใจ)"
         severity = "low"
+        author = "Luna Guard project"
+        source = "First-party heuristic; authored in this repository"
+        reference = ""
+        license = "Unspecified; review before redistribution"
+        rule_version = "1"
+        false_positive_notes = "Weak indicators; requires manual review"
+        reviewed = "not independently reviewed"
     strings:
         $hid = "-WindowStyle Hidden" ascii wide nocase
         $byp = "-ExecutionPolicy Bypass" ascii wide nocase
