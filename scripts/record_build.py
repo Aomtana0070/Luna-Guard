@@ -50,6 +50,7 @@ def main():
         "dependencies": packages,
         "signed": args.signed,
         "production_signed": args.signed,
+        "signing_identity": "authenticode" if args.signed else "unsigned",
     }
     (output_dir / "build-provenance.json").write_text(
         json.dumps(provenance, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
