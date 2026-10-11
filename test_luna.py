@@ -1,4 +1,4 @@
-"""Regression tests for Luna Guard (run: python -m unittest -v test_luna).
+"""36 test cases ของ Luna Guard  (รัน: python -m unittest -v test_luna)
 ส่วนที่เป็นคำสั่ง Windows (netstat/schtasks/ipconfig/registry) จำลองผลลัพธ์ด้วย mock - ไฟล์/แฮช/YARA/กักกัน/ฐานข้อมูลทดสอบจริง"""
 import argparse, contextlib, hashlib, io, json, os, struct, sys, tempfile, threading, unittest, zipfile
 from pathlib import Path
@@ -252,82 +252,6 @@ class T(unittest.TestCase):
             self.assertFalse(f.exists()); lg.cmd_restore(argparse.Namespace(id=qid))
         self.assertTrue(f.exists())
 
-    def test_quarantine_verifies_copy_before_removing_source(self):
-        source = TMP / "quarantine-check.exe"
-        source.write_bytes(XW)
-        digest = hashlib.sha256(XW).hexdigest()
-
-        qid = lg.quarantine_file(str(source), digest, ["test"])
-
-        self.assertFalse(source.exists())
-        self.assertEqual(lg.sha256_of(lg.QUAR_DIR / f"{qid}.quar"), digest)
-        entry = lg.load_index()[qid]
-        self.assertEqual(entry["status"], "committed")
-        self.assertTrue(entry["original_removed"])
-
-    def test_quarantine_rejects_changed_source_without_moving_it(self):
-        source = TMP / "changed-before-quarantine.exe"
-        source.write_bytes(b"changed")
-
-        with self.assertRaisesRegex(RuntimeError, "เปลี่ยนไป"):
-            lg.quarantine_file(str(source), hashlib.sha256(b"expected").hexdigest(), ["test"])
-
-        self.assertEqual(source.read_bytes(), b"changed")
-        self.assertEqual(lg.load_index(), {})
-
-    def test_restore_rejects_modified_quarantine_file(self):
-        source = TMP / "tamper-check.exe"
-        source.write_bytes(XW)
-        qid = lg.quarantine_file(str(source), hashlib.sha256(XW).hexdigest(), ["test"])
-        (lg.QUAR_DIR / f"{qid}.quar").write_bytes(b"modified")
-
-        with self.assertRaisesRegex(RuntimeError, "SHA-256"):
-            lg.cmd_restore(argparse.Namespace(id=qid))
-
-        self.assertFalse(source.exists())
-        self.assertIn(qid, lg.load_index())
-
-    def test_restore_never_overwrites_existing_destination(self):
-        source = TMP / "restore-conflict.exe"
-        source.write_bytes(XW)
-        qid = lg.quarantine_file(str(source), hashlib.sha256(XW).hexdigest(), ["test"])
-        source.write_bytes(b"keep existing file")
-
-        with self.assertRaises(FileExistsError):
-            lg.cmd_restore(argparse.Namespace(id=qid))
-
-        self.assertEqual(source.read_bytes(), b"keep existing file")
-        self.assertTrue((lg.QUAR_DIR / f"{qid}.quar").exists())
-        self.assertIn(qid, lg.load_index())
-
-    def test_restore_recovers_after_destination_was_created(self):
-        source = TMP / "restore-recovery.exe"
-        source.write_bytes(XW)
-        qid = lg.quarantine_file(str(source), hashlib.sha256(XW).hexdigest(), ["test"])
-        source.write_bytes(XW)
-        index = lg.load_index()
-        index[qid]["status"] = "restoring"
-        index[qid]["restore_destination"] = str(source)
-        lg._write_quarantine_index(index)
-
-        with contextlib.redirect_stdout(io.StringIO()):
-            lg.cmd_restore(argparse.Namespace(id=qid))
-
-        self.assertEqual(source.read_bytes(), XW)
-        self.assertFalse((lg.QUAR_DIR / f"{qid}.quar").exists())
-        self.assertNotIn(qid, lg.load_index())
-
-    def test_restore_rejects_path_traversal_quarantine_id(self):
-        with self.assertRaises(SystemExit):
-            lg.cmd_restore(argparse.Namespace(id="../outside"))
-
-    def test_corrupt_quarantine_index_is_not_treated_as_empty(self):
-        lg.QUAR_DIR.mkdir(parents=True, exist_ok=True)
-        lg.QUAR_INDEX.write_text("{broken", encoding="utf-8")
-
-        with self.assertRaisesRegex(RuntimeError, "เสียหาย"):
-            lg.load_index()
-
     def test12_allowlist_and_path_safety(self):
         f = TMP / "l2.ps1"; f.write_bytes(b'#2 x.DownloadString("http://a");[Convert]::FromBase64String($a);-WindowStyle Hidden')
         _, r = scan(); self.assertEqual(sev(r, "ไฟล์"), ["medium"])
@@ -463,100 +387,18 @@ class T(unittest.TestCase):
         thread = threading.Thread(target=server.serve_forever, daemon=True)
         thread.start()
         try:
-            page_url = f"http://127.0.0.1:{server.server_address[1]}/#t={dashboard.TOKEN}"
+            page_url = f"http://127.0.0.1:{server.server_address[1]}/?t={dashboard.TOKEN}"
             with urlopen(page_url, timeout=5) as response:
                 page = response.read().decode("utf-8")
             self.assertIn('id="brandLogo"', page)
             self.assertIn(".brand-logo{width:52px;height:52px", page)
             self.assertIn('width="52" height="52"', page)
-            self.assertIn("new URLSearchParams(location.hash.slice(1))", page)
-            self.assertIn("logo.src='/logo/Luna_Guard.png'", page)
-            self.assertNotIn("location.search).get('t')", page)
-            url = f"http://127.0.0.1:{server.server_address[1]}/logo/Luna_Guard.png"
+            self.assertIn("logo.src='/logo/Luna_Guard.png?t='+encodeURIComponent(T||'')", page)
+            self.assertNotIn('src="/logo/Luna_Guard.png"', page)
+            url = f"http://127.0.0.1:{server.server_address[1]}/logo/Luna_Guard.png?t={dashboard.TOKEN}"
             with urlopen(url, timeout=5) as response:
                 self.assertEqual(response.headers.get_content_type(), "image/png")
                 self.assertEqual(response.read(), expected)
-        finally:
-            server.shutdown()
-            server.server_close()
-            thread.join(timeout=5)
-
-    def test_dashboard_api_requires_header_token_and_local_origin(self):
-        server = dashboard.ThreadingHTTPServer(("127.0.0.1", 0), dashboard.H)
-        thread = threading.Thread(target=server.serve_forever, daemon=True)
-        thread.start()
-        base = f"http://127.0.0.1:{server.server_address[1]}"
-
-        def get(path, headers=None):
-            request = Request(base + path, headers=headers or {})
-            try:
-                with urlopen(request, timeout=5) as response:
-                    return response.status
-            except HTTPError as error:
-                error.close()
-                return error.code
-
-        def post(path, body, headers):
-            request = Request(
-                base + path,
-                data=body,
-                headers=headers,
-                method="POST",
-            )
-            try:
-                with urlopen(request, timeout=5) as response:
-                    return response.status
-            except HTTPError as error:
-                error.close()
-                return error.code
-
-        try:
-            self.assertEqual(get("/api/state", {"X-T": dashboard.TOKEN}), 200)
-            self.assertEqual(get(f"/api/state?t={dashboard.TOKEN}"), 403)
-            self.assertEqual(
-                get("/api/state", {
-                    "X-T": dashboard.TOKEN,
-                    "Origin": "http://attacker.invalid",
-                }),
-                403,
-            )
-            valid_headers = {
-                "X-T": dashboard.TOKEN,
-                "Content-Type": "application/json",
-            }
-            self.assertEqual(post("/api/unknown", b"{}", {
-                "X-T": dashboard.TOKEN,
-                "Content-Type": "text/plain",
-            }), 415)
-            self.assertEqual(post("/api/unknown", b"{bad", valid_headers), 400)
-            self.assertEqual(post(
-                "/api/unknown",
-                b" " * (dashboard.MAX_API_BODY_BYTES + 1),
-                valid_headers,
-            ), 413)
-        finally:
-            server.shutdown()
-            server.server_close()
-            thread.join(timeout=5)
-
-    def test_dashboard_language_api_persists_selected_language(self):
-        server = dashboard.ThreadingHTTPServer(("127.0.0.1", 0), dashboard.H)
-        thread = threading.Thread(target=server.serve_forever, daemon=True)
-        thread.start()
-        request = Request(
-            f"http://127.0.0.1:{server.server_address[1]}/api/language",
-            data=json.dumps({"language": "en"}).encode(),
-            headers={
-                "X-T": dashboard.TOKEN,
-                "Content-Type": "application/json",
-            },
-            method="POST",
-        )
-        try:
-            with urlopen(request, timeout=5) as response:
-                self.assertEqual(response.status, 200)
-                self.assertTrue(json.loads(response.read())["ok"])
-            self.assertEqual(dashboard.get_language(), "en")
         finally:
             server.shutdown()
             server.server_close()
@@ -627,8 +469,7 @@ class T(unittest.TestCase):
             created.append(Path(temporary_file.name))
             return temporary_file
 
-        with mock.patch.object(lg, "MAX_ARCHIVE_MEMBER_BYTES", 300 * 1024 * 1024), \
-                mock.patch.object(lg.tempfile, "NamedTemporaryFile", side_effect=tracked_temporary_file), \
+        with mock.patch.object(lg.tempfile, "NamedTemporaryFile", side_effect=tracked_temporary_file), \
                 mock.patch.object(lg, "yara_scan_file", return_value=[]):
             _, result = scan()
         self.assertTrue(result["complete"])
@@ -644,84 +485,6 @@ class T(unittest.TestCase):
         self.assertFalse(result["complete"])
         self.assertGreater(result["issues"], 0)
         self.assertIn("disk full", output)
-
-    def test_archive_member_count_limit_marks_scan_incomplete(self):
-        archive_path = TMP / "member-limit.zip"
-        with zipfile.ZipFile(archive_path, "w", zipfile.ZIP_DEFLATED) as archive:
-            archive.writestr("one.txt", b"ordinary")
-            archive.writestr("two.txt", b"ordinary")
-        with mock.patch.object(lg, "MAX_ARCHIVE_MEMBERS", 1):
-            output, result = scan()
-        self.assertFalse(result["complete"])
-        self.assertGreater(result["issues"], 0)
-        self.assertIn("สมาชิกเกินขีดจำกัด", output)
-
-    def test_archive_member_size_limit_marks_scan_incomplete(self):
-        archive_path = TMP / "member-size-limit.zip"
-        with zipfile.ZipFile(archive_path, "w", zipfile.ZIP_DEFLATED) as archive:
-            archive.writestr("large.txt", b"x" * 100)
-        with mock.patch.object(lg, "MAX_ARCHIVE_MEMBER_BYTES", 64):
-            output, result = scan()
-        self.assertFalse(result["complete"])
-        self.assertGreater(result["issues"], 0)
-        self.assertIn("เกินขนาดต่อไฟล์", output)
-
-    def test_archive_expanded_bytes_limit_cleans_temporary_files(self):
-        archive_path = TMP / "expanded-limit.zip"
-        with zipfile.ZipFile(archive_path, "w", zipfile.ZIP_DEFLATED) as archive:
-            archive.writestr("payload.exe", XW)
-        created = []
-        named_temporary_file = lg.tempfile.NamedTemporaryFile
-
-        def tracked_temporary_file(**kwargs):
-            kwargs["dir"] = TMP
-            temporary_file = named_temporary_file(**kwargs)
-            created.append(Path(temporary_file.name))
-            return temporary_file
-
-        with mock.patch.object(lg, "MAX_ARCHIVE_EXPANDED_BYTES", 16), \
-                mock.patch.object(lg.tempfile, "NamedTemporaryFile", side_effect=tracked_temporary_file):
-            output, result = scan()
-        self.assertFalse(result["complete"])
-        self.assertIn("ข้อมูลคลายบีบอัดรวม", output)
-        self.assertTrue(created)
-        self.assertTrue(all(not temporary_file.exists() for temporary_file in created))
-
-    def test_archive_nesting_depth_limit_marks_scan_incomplete(self):
-        content = io.BytesIO()
-        with zipfile.ZipFile(content, "w", zipfile.ZIP_DEFLATED) as archive:
-            archive.writestr("payload.exe", XW)
-        for _ in range(3):
-            nested = io.BytesIO()
-            with zipfile.ZipFile(nested, "w", zipfile.ZIP_DEFLATED) as archive:
-                archive.writestr("nested.zip", content.getvalue())
-            content = nested
-        archive_path = TMP / "depth-limit.zip"
-        archive_path.write_bytes(content.getvalue())
-        with mock.patch.object(lg, "MAX_ARCHIVE_NESTING_DEPTH", 2):
-            output, result = scan()
-        self.assertFalse(result["complete"])
-        self.assertIn("ความลึกสูงสุด", output)
-
-    def test_archive_time_limit_marks_scan_incomplete_and_cleans_temporary_files(self):
-        archive_path = TMP / "time-limit.zip"
-        with zipfile.ZipFile(archive_path, "w", zipfile.ZIP_DEFLATED) as archive:
-            archive.writestr("payload.exe", XW)
-        created = []
-        named_temporary_file = lg.tempfile.NamedTemporaryFile
-
-        def tracked_temporary_file(**kwargs):
-            kwargs["dir"] = TMP
-            temporary_file = named_temporary_file(**kwargs)
-            created.append(Path(temporary_file.name))
-            return temporary_file
-
-        with mock.patch.object(lg, "MAX_ARCHIVE_SCAN_SECONDS", 0), \
-                mock.patch.object(lg.tempfile, "NamedTemporaryFile", side_effect=tracked_temporary_file):
-            output, result = scan()
-        self.assertFalse(result["complete"])
-        self.assertIn("เกินเวลาที่กำหนด", output)
-        self.assertTrue(all(not temporary_file.exists() for temporary_file in created))
 
     def test28_defender_status_and_scan_commands_are_validated(self):
         completed = __import__("subprocess").CompletedProcess(

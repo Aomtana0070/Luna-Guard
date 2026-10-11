@@ -34,7 +34,6 @@ import time
 import urllib.parse
 import urllib.error
 import urllib.request
-import uuid
 import zipfile
 import zlib
 from pathlib import Path
@@ -50,11 +49,6 @@ DB_PATH = APP_DIR / "threats.db"
 QUAR_DIR = APP_DIR / "quarantine"
 QUAR_INDEX = QUAR_DIR / "index.json"
 ARCHIVE_EXT = {".zip", ".jar", ".docx", ".docm", ".xlsx", ".xlsm", ".pptx", ".pptm", ".apk"}
-MAX_ARCHIVE_MEMBERS = 10000
-MAX_ARCHIVE_MEMBER_BYTES = 256 * 1024 * 1024
-MAX_ARCHIVE_EXPANDED_BYTES = 512 * 1024 * 1024
-MAX_ARCHIVE_NESTING_DEPTH = 8
-MAX_ARCHIVE_SCAN_SECONDS = 180
 TAGS = ["XWorm", "MrBeast"]  # แท็กที่ดึงจาก MalwareBazaar / ThreatFox
 
 # โดเมนหลอกลวงที่รู้จัก (เพิ่มเองได้ด้วยการแก้ลิสต์นี้)
@@ -488,45 +482,12 @@ def scan_archive(path, con):
     findings = []
     archive_stack = []
     container = str(path)
-    members_seen = 0
-    expanded_bytes = 0
-    started_at = time.monotonic()
-    limit_hit = False
-    member_bytes = 0
-
-    def read_member(member, amount, label):
-        nonlocal expanded_bytes, member_bytes, limit_hit
-        if time.monotonic() - started_at > MAX_ARCHIVE_SCAN_SECONDS:
-            scan_issue(f"หยุดตรวจ archive เมื่อเกินเวลาที่กำหนด: {label}")
-            limit_hit = True
-            return None
-        chunk = member.read(amount)
-        if not chunk:
-            return b""
-        member_bytes += len(chunk)
-        expanded_bytes += len(chunk)
-        if member_bytes > MAX_ARCHIVE_MEMBER_BYTES:
-            scan_issue(f"ข้ามสมาชิก archive ที่เกินขนาดต่อไฟล์: {label}")
-            limit_hit = True
-            return None
-        if expanded_bytes > MAX_ARCHIVE_EXPANDED_BYTES:
-            scan_issue(f"หยุดตรวจ archive เมื่อข้อมูลคลายบีบอัดรวมเกินขีดจำกัด: {label}")
-            limit_hit = True
-            return None
-        return chunk
 
     def push_archive(source, label, temporary_path=None):
         archive = None
         try:
             archive = zipfile.ZipFile(source)
-            infos = archive.infolist()
-            if len(infos) > MAX_ARCHIVE_MEMBERS:
-                scan_issue(f"ข้าม archive ที่มีสมาชิกเกินขีดจำกัด: {label}")
-                close_archive(archive, label)
-                if temporary_path:
-                    remove_temporary(temporary_path, label)
-                return
-            entries = iter(infos)
+            entries = iter(archive.infolist())
         except (OSError, RuntimeError, zipfile.BadZipFile, EOFError) as e:
             if archive:
                 close_archive(archive, label)
@@ -559,11 +520,7 @@ def scan_archive(path, con):
     push_archive(path, container)
     try:
         while archive_stack:
-            if STOP["flag"] or limit_hit:
-                break
-            if time.monotonic() - started_at > MAX_ARCHIVE_SCAN_SECONDS:
-                scan_issue(f"หยุดตรวจ archive เมื่อเกินเวลาที่กำหนด: {archive_stack[-1]['label']}")
-                limit_hit = True
+            if STOP["flag"]:
                 break
             frame = archive_stack[-1]
             try:
@@ -575,39 +532,24 @@ def scan_archive(path, con):
                 scan_issue(f"อ่านรายการ archive ไม่สำเร็จ {frame['label']}: {e}")
                 close_frame(archive_stack.pop())
                 continue
-            members_seen += 1
-            if members_seen > MAX_ARCHIVE_MEMBERS:
-                scan_issue(f"หยุดตรวจ archive เมื่อจำนวนสมาชิกเกินขีดจำกัด: {frame['label']}")
-                limit_hit = True
-                break
             if info.is_dir():
                 continue
             target = f"{frame['label']}!{info.filename}"
             if info.flag_bits & 0x1:
                 scan_issue(f"ข้ามไฟล์ใน archive ที่เข้ารหัสไว้: {target}")
                 continue
-            if info.file_size > MAX_ARCHIVE_MEMBER_BYTES:
-                scan_issue(f"ข้ามสมาชิก archive ที่เกินขนาดต่อไฟล์: {target}")
-                continue
             suffix = Path(info.filename).suffix.lower()
             is_script = suffix in SCRIPT_EXT
             is_archive = suffix in ARCHIVE_EXT
             member_temp_path = None
-            member_bytes = 0
             try:
                 with frame["archive"].open(info) as member:
-                    prefix = read_member(member, 4, target)
-                    if prefix is None:
-                        break
+                    prefix = member.read(4)
                     is_nested_zip = prefix.startswith((b"PK\x03\x04", b"PK\x05\x06", b"PK\x07\x08"))
                     if not (is_script or is_archive or prefix[:2] == b"MZ" or is_nested_zip):
-                        while not STOP["flag"] and not limit_hit:
-                            chunk = read_member(member, 1024 * 1024, target)
-                            if chunk is None:
-                                break
-                            if not chunk:
-                                break
-                        if STOP["flag"] or limit_hit:
+                        while member.read(1024 * 1024) and not STOP["flag"]:
+                            pass
+                        if STOP["flag"]:
                             break
                         continue
                     with tempfile.NamedTemporaryFile(
@@ -615,14 +557,11 @@ def scan_archive(path, con):
                     ) as extracted:
                         member_temp_path = extracted.name
                         extracted.write(prefix)
-                        while not STOP["flag"] and not limit_hit:
-                            chunk = read_member(member, 1024 * 1024, target)
-                            if chunk is None:
-                                break
-                            if not chunk:
+                        while chunk := member.read(1024 * 1024):
+                            if STOP["flag"]:
                                 break
                             extracted.write(chunk)
-                if STOP["flag"] or limit_hit:
+                if STOP["flag"]:
                     break
                 if is_script or prefix[:2] == b"MZ":
                     severity, reasons, _ = analyze(member_temp_path, con, logical_path=info.filename)
@@ -632,11 +571,8 @@ def scan_archive(path, con):
                             "why": "; ".join(reasons), "container": container,
                         })
                 if is_archive or is_nested_zip:
-                    if len(archive_stack) - 1 >= MAX_ARCHIVE_NESTING_DEPTH:
-                        scan_issue(f"ข้าม archive ซ้อนที่เกินความลึกสูงสุด: {target}")
-                    else:
-                        push_archive(member_temp_path, target, member_temp_path)
-                        member_temp_path = None
+                    push_archive(member_temp_path, target, member_temp_path)
+                    member_temp_path = None
             except (OSError, RuntimeError, zipfile.BadZipFile, EOFError, NotImplementedError, zlib.error) as e:
                 scan_issue(f"อ่านหรือจัดเก็บไฟล์ใน archive ไม่สำเร็จ {target}: {e}")
             finally:
@@ -848,154 +784,19 @@ def powershell_history():
 # ---------------------------------------------------------------- กักกัน / กำจัด
 def load_index():
     try:
-        raw = QUAR_INDEX.read_text(encoding="utf-8")
-    except FileNotFoundError:
+        return json.loads(QUAR_INDEX.read_text(encoding="utf-8"))
+    except Exception:
         return {}
-    except OSError as e:
-        raise RuntimeError(f"อ่าน quarantine index ไม่สำเร็จ: {e}") from e
-    try:
-        idx = json.loads(raw)
-    except json.JSONDecodeError as e:
-        raise RuntimeError(f"quarantine index เสียหาย: {e}") from e
-    if not isinstance(idx, dict):
-        raise RuntimeError("quarantine index ต้องเป็น JSON object")
-    for qid, entry in idx.items():
-        if not _valid_quarantine_id(qid) or not isinstance(entry, dict):
-            raise RuntimeError("quarantine index มีรายการที่ไม่ถูกต้อง")
-        if not isinstance(entry.get("original"), str):
-            raise RuntimeError(f"quarantine metadata ไม่ถูกต้อง: {qid}")
-        if not re.fullmatch(r"[0-9a-f]{64}", str(entry.get("sha256", ""))):
-            raise RuntimeError(f"quarantine SHA-256 ไม่ถูกต้อง: {qid}")
-        if not isinstance(entry.get("why"), list):
-            raise RuntimeError(f"quarantine reasons ไม่ถูกต้อง: {qid}")
-    return idx
-
-
-def _valid_quarantine_id(qid):
-    return isinstance(qid, str) and re.fullmatch(r"[A-Za-z0-9_-]{1,80}", qid) is not None
-
-
-def _path_is_within(path, directory):
-    try:
-        Path(path).resolve().relative_to(Path(directory).resolve())
-        return True
-    except ValueError:
-        return False
-
-
-def _write_quarantine_index(index):
-    QUAR_DIR.mkdir(parents=True, exist_ok=True)
-    temp_path = None
-    try:
-        with tempfile.NamedTemporaryFile(
-            mode="w",
-            encoding="utf-8",
-            dir=QUAR_DIR,
-            prefix=".index-",
-            suffix=".tmp",
-            delete=False,
-        ) as temp:
-            temp_path = Path(temp.name)
-            json.dump(index, temp, indent=2, ensure_ascii=False)
-            temp.flush()
-            os.fsync(temp.fileno())
-        os.replace(temp_path, QUAR_INDEX)
-    except OSError as e:
-        if temp_path is not None:
-            temp_path.unlink(missing_ok=True)
-        raise RuntimeError(f"เขียน quarantine index ไม่สำเร็จ: {e}") from e
-
-
-def _copy_and_hash(source, destination):
-    digest = hashlib.sha256()
-    with open(source, "rb") as src, open(destination, "xb") as dst:
-        for chunk in iter(lambda: src.read(1 << 20), b""):
-            digest.update(chunk)
-            dst.write(chunk)
-        dst.flush()
-        os.fsync(dst.fileno())
-    return digest.hexdigest()
-
-
-def _restore_destination(path):
-    destination = Path(path)
-    if not destination.is_absolute():
-        raise OSError("ตำแหน่ง Restore ต้องเป็น absolute path")
-    parent = destination.parent.resolve(strict=True)
-    destination = parent / destination.name
-    if _path_is_within(destination, QUAR_DIR):
-        raise OSError("ห้าม Restore เข้าไปในโฟลเดอร์ quarantine")
-    return destination
-
-
-def _finish_restore(qid, index, entry, destination):
-    expected_sha = entry["sha256"]
-    if not destination.is_file() or sha256_of(destination) != expected_sha:
-        raise RuntimeError("ไฟล์ปลายทางไม่ตรงกับ SHA-256; เก็บ quarantine ไว้")
-    entry["status"] = "restored"
-    entry["restore_destination"] = str(destination)
-    _write_quarantine_index(index)
-
-    qfile = QUAR_DIR / f"{qid}.quar"
-    if qfile.exists():
-        if qfile.is_symlink() or not qfile.is_file() or sha256_of(qfile) != expected_sha:
-            raise RuntimeError("ไฟล์ quarantine เปลี่ยนแปลงหลัง Restore; เก็บรายการไว้ตรวจสอบ")
-        qfile.unlink()
-    del index[qid]
-    _write_quarantine_index(index)
 
 
 def quarantine_file(path, sha, why):
-    source = Path(path)
-    if source.is_symlink():
-        raise OSError("ไม่กักกัน symbolic link")
-    source = source.resolve(strict=True)
-    if not source.is_file() or _path_is_within(source, QUAR_DIR):
-        raise OSError("path ต้นทางไม่ใช่ไฟล์ที่กักกันได้")
-    sha = str(sha).lower()
-    if not re.fullmatch(r"[0-9a-f]{64}", sha):
-        raise ValueError("SHA-256 ไม่ถูกต้อง")
-    if sha256_of(source) != sha:
-        raise RuntimeError("ไฟล์ต้นทางเปลี่ยนไปหลังการสแกน; ยกเลิกการกักกัน")
-
     QUAR_DIR.mkdir(parents=True, exist_ok=True)
-    qid = f"{dt.datetime.now():%Y%m%d%H%M%S}_{uuid.uuid4().hex}"
+    qid = f"{dt.datetime.now():%Y%m%d%H%M%S}_{sha[:8]}"
     dest = QUAR_DIR / f"{qid}.quar"
+    shutil.move(path, dest)
     idx = load_index()
-    idx[qid] = {
-        "original": str(source),
-        "sha256": sha,
-        "why": list(why),
-        "status": "pending",
-        "created_at": dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds"),
-    }
-    _write_quarantine_index(idx)
-
-    temp_path = QUAR_DIR / f".{qid}.tmp"
-    try:
-        copied_sha = _copy_and_hash(source, temp_path)
-        if copied_sha != sha or sha256_of(source) != sha:
-            raise RuntimeError("ไฟล์ต้นทางเปลี่ยนระหว่างกักกัน; ยกเลิกการกักกัน")
-        os.replace(temp_path, dest)
-        idx[qid]["status"] = "committed"
-        idx[qid]["original_removed"] = False
-        _write_quarantine_index(idx)
-    except Exception:
-        temp_path.unlink(missing_ok=True)
-        if not dest.exists():
-            idx.pop(qid, None)
-            _write_quarantine_index(idx)
-        raise
-
-    try:
-        if sha256_of(source) == sha:
-            source.unlink()
-            idx[qid]["original_removed"] = True
-            _write_quarantine_index(idx)
-        else:
-            print(f"[!] กักกันสำเนาแล้ว แต่ไฟล์ต้นทางเปลี่ยนแปลงและยังคงอยู่: {source}")
-    except OSError as e:
-        print(f"[!] กักกันสำเนาแล้ว แต่ลบไฟล์ต้นทางไม่สำเร็จ: {e}")
+    idx[qid] = {"original": path, "sha256": sha, "why": why}
+    QUAR_INDEX.write_text(json.dumps(idx, indent=2, ensure_ascii=False), encoding="utf-8")
     return qid
 
 
@@ -1008,62 +809,14 @@ def cmd_quarantine(_args=None):
 
 
 def cmd_restore(args):
-    if not _valid_quarantine_id(args.id):
-        sys.exit("รหัส quarantine ไม่ถูกต้อง")
     idx = load_index()
     v = idx.get(args.id)
     if not v:
         sys.exit("ไม่พบรหัสนี้")
-    qfile = QUAR_DIR / f"{args.id}.quar"
-    expected_sha = v["sha256"]
-    destination = _restore_destination(
-        v.get("restore_destination", v["original"])
-        if v.get("status") in ("restoring", "restored")
-        else v["original"]
-    )
-    if v.get("status") in ("restoring", "restored") and destination.exists():
-        if sha256_of(destination) != expected_sha:
-            raise FileExistsError(f"ปลายทางมีไฟล์ที่ไม่ตรงกับรายการ; ไม่เขียนทับ: {destination}")
-        _finish_restore(args.id, idx, v, destination)
-        print(f"[+] กู้ไฟล์กลับไปที่ {destination}")
-        return
-    if v.get("status") == "restored":
-        raise RuntimeError("metadata ระบุว่า Restore แล้ว แต่ไม่พบไฟล์ปลายทาง")
-    if qfile.is_symlink() or not qfile.is_file():
-        raise OSError("ไม่พบไฟล์ quarantine ที่ถูกต้อง")
-    if not _path_is_within(qfile, QUAR_DIR):
-        raise OSError("ตำแหน่งไฟล์ quarantine ไม่ถูกต้อง")
-    if sha256_of(qfile) != expected_sha:
-        raise RuntimeError("ไฟล์ quarantine ไม่ตรงกับ SHA-256 ที่บันทึกไว้; ระงับการ Restore")
-    if destination.exists():
-        raise FileExistsError(f"ปลายทางมีไฟล์อยู่แล้ว; ไม่เขียนทับ: {destination}")
-
-    v["status"] = "restoring"
-    v["restore_destination"] = str(destination)
-    _write_quarantine_index(idx)
-
-    temp_path = destination.parent / f".{destination.name}.{uuid.uuid4().hex}.restore"
-    try:
-        if _copy_and_hash(qfile, temp_path) != expected_sha:
-            raise RuntimeError("ไฟล์เปลี่ยนระหว่าง Restore; ยกเลิกการกู้คืน")
-        os.link(temp_path, destination)
-        temp_path.unlink()
-        if sha256_of(destination) != expected_sha:
-            destination.unlink(missing_ok=True)
-            raise RuntimeError("ตรวจสอบ SHA-256 หลัง Restore ไม่ผ่าน")
-    except FileExistsError:
-        raise
-    except OSError as e:
-        raise RuntimeError(f"Restore ไม่สำเร็จ; ไฟล์ quarantine ยังถูกเก็บไว้: {e}") from e
-    finally:
-        if temp_path.exists():
-            temp_path.unlink(missing_ok=True)
-
-    try:
-        _finish_restore(args.id, idx, v, destination)
-    except OSError as e:
-        print(f"[!] กู้คืนไฟล์แล้ว แต่ทำความสะอาดสถานะ quarantine ไม่สำเร็จ: {e}")
-    print(f"[+] กู้ไฟล์กลับไปที่ {destination}")
+    shutil.move(QUAR_DIR / f"{args.id}.quar", v["original"])
+    del idx[args.id]
+    QUAR_INDEX.write_text(json.dumps(idx, indent=2, ensure_ascii=False), encoding="utf-8")
+    print(f"[+] กู้ไฟล์กลับไปที่ {v['original']}")
 
 
 # ---------------------------------------------------------------- สแกนหลัก
