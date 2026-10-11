@@ -14,6 +14,7 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("artifact", type=Path)
     parser.add_argument("--output-dir", type=Path)
+    parser.add_argument("--signed", action="store_true", help="set only after verifying the artifact signature")
     args = parser.parse_args()
     artifact = args.artifact.resolve(strict=True)
     output_dir = (args.output_dir or artifact.parent).resolve()
@@ -47,7 +48,8 @@ def main():
         "python": platform.python_version(),
         "platform": platform.platform(),
         "dependencies": packages,
-        "signed": False,
+        "signed": args.signed,
+        "production_signed": args.signed,
     }
     (output_dir / "build-provenance.json").write_text(
         json.dumps(provenance, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"

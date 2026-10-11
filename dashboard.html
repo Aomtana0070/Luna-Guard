@@ -41,7 +41,7 @@ dialog.onboarding{max-width:min(560px,calc(100% - 32px));width:560px;border:1px 
 <section class="tab on" id="t-dash">
  <div class="card hero"><svg viewBox="0 0 120 120" width="180" id="ring" role="img" aria-label="Scan status"></svg>
   <div><div class="big" id="status" role="status" aria-live="polite">—</div><div class="mu" id="substatus" aria-live="polite"></div>
-   <div class="btns"><button class="b p" data-i18n="scan.autoFiles" onclick="act('scan',{files_only:true})">สแกนไฟล์อัตโนมัติ</button><button class="b" data-i18n="scan.quick" onclick="act('scan',{})">สแกนด่วน (ทุกชั้น)</button><button class="b" data-i18n="scan.full" onclick="act('scan',{full:true})">สแกนทั้งไดรฟ์ C:</button>
+   <div class="btns"><button class="b p" data-i18n="scan.autoFiles" onclick="act('scan',{files_only:true})">สแกนไฟล์อัตโนมัติ</button><button class="b" data-i18n="scan.quick" onclick="act('scan',{})">สแกนด่วน (ทุกชั้น)</button><button class="b" data-i18n="scan.full" onclick="if(confirm(t('action.confirmFullScan')))act('scan',{full:true})">สแกนทั้งไดรฟ์ C:</button>
    <button class="b" data-i18n="scan.deepArchives" onclick="if(confirm(t('action.confirmDeepArchives')))act('scan',{deep_archives:true})">สแกนด่วน + archive ลึก</button>
    <button class="b d" data-i18n="scan.clean" onclick="if(confirm(t('action.confirmClean')))act('scan',{clean:true})">สแกน + กำจัด</button>
    <button class="b" data-i18n="scan.defenderQuick" onclick="act('defender-scan',{scan_type:'quick'})">Defender Quick Scan</button>

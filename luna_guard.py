@@ -1251,19 +1251,41 @@ def default_scan_dirs():
     return roots
 
 
-def walk_files(roots):
-    skip = {str(APP_DIR).lower()}
+def walk_files(roots, full_coverage=False):
+    skip = set() if full_coverage else {str(APP_DIR).lower()}
     def report_walk_error(error):
         scan_issue(f"อ่านโฟลเดอร์สแกนไม่สำเร็จ {error.filename or ''}: {error}")
 
+    def is_reparse_point(path):
+        try:
+            info = os.stat(path, follow_symlinks=False)
+            return bool(getattr(info, "st_file_attributes", 0) & 0x400) or os.path.islink(path)
+        except OSError as error:
+            scan_issue(f"ตรวจชนิดโฟลเดอร์ไม่ได้ จึงข้ามไว้ก่อน {path}: {error}")
+            return True
+
     for root in roots:
         for dp, dn, fn in os.walk(root, onerror=report_walk_error):
-            if dp.lower() in skip or in_windows_dir(dp) or "\\windows defender" in dp.lower():
+            if dp.lower() in skip or (not full_coverage and (in_windows_dir(dp) or "\\windows defender" in dp.lower())):
                 dn[:] = []
                 continue
-            dn[:] = [d for d in dn if d.lower() not in SKIP_DIRS]
+            if full_coverage:
+                kept = []
+                for directory in dn:
+                    child = os.path.join(dp, directory)
+                    if is_reparse_point(child):
+                        scan_issue(f"ข้าม junction/reparse point เพื่อป้องกันการวนซ้ำหรือออกนอกไดรฟ์: {child}")
+                    else:
+                        kept.append(directory)
+                dn[:] = kept
+            else:
+                dn[:] = [d for d in dn if d.lower() not in SKIP_DIRS]
             for n in fn:
-                yield os.path.join(dp, n)
+                path = os.path.join(dp, n)
+                if full_coverage and is_reparse_point(path):
+                    scan_issue(f"ข้ามไฟล์ reparse point เพื่อป้องกันการออกนอกไดรฟ์: {path}")
+                    continue
+                yield path
 
 
 def list_processes():
@@ -1485,7 +1507,7 @@ def cmd_scan(args):
         print("[!] เครื่องมือนี้ออกแบบสำหรับ Windows - บางส่วนจะข้ามไป")
     files_only = bool(getattr(args, "files_only", False))
     clean = bool(args.clean)
-    deep_archives = bool(getattr(args, "deep_archives", False))
+    deep_archives = bool(getattr(args, "deep_archives", False) or getattr(args, "full", False))
     if files_only and clean:
         raise SystemExit("โหมดสแกนไฟล์อัตโนมัติเป็นแบบดูอย่างเดียว; เลือกกักกันเองจากผลสแกน")
     if files_only and getattr(args, "full", False):
@@ -1524,7 +1546,7 @@ def cmd_scan(args):
     for i, root in enumerate(roots, 1):
         rt, rc, last = time.time(), 0, time.time()
         print(f"      ▶ [{i}/{len(roots)}] เริ่ม: {root}")
-        for f in walk_files([root]):
+        for f in walk_files([root], full_coverage=bool(getattr(args, "full", False))):
             if STOP["flag"]:
                 break
             count += 1

@@ -46,15 +46,63 @@ jobs:
       - name: Build Android APK
         working-directory: mobile
         run: flutter build apk --release
+      - name: Require Android release signing credentials
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: |
+          test -n "$ANDROID_KEYSTORE_BASE64" || { echo "Missing ANDROID_KEYSTORE_BASE64"; exit 1; }
+          test -n "$ANDROID_KEYSTORE_PASSWORD" || { echo "Missing ANDROID_KEYSTORE_PASSWORD"; exit 1; }
+          test -n "$ANDROID_KEY_ALIAS" || { echo "Missing ANDROID_KEY_ALIAS"; exit 1; }
+          test -n "$ANDROID_KEY_PASSWORD" || { echo "Missing ANDROID_KEY_PASSWORD"; exit 1; }
+      - name: Sign and verify release APK
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          KEYSTORE_PATH="$RUNNER_TEMP/lunaguard-release.jks"
+          APK="mobile/build/app/outputs/flutter-apk/app-release.apk"
+          SIGNED_APK="$RUNNER_TEMP/LunaGuard-Android-signed.apk"
+          trap 'rm -f "$KEYSTORE_PATH" "$SIGNED_APK"' EXIT
+          printf '%s' "$ANDROID_KEYSTORE_BASE64" | base64 --decode > "$KEYSTORE_PATH"
+          SDK_ROOT="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-}}"
+          test -n "$SDK_ROOT"
+          APKSIGNER="$(find "$SDK_ROOT/build-tools" -type f -name apksigner | sort -V | tail -n 1)"
+          test -x "$APKSIGNER"
+          "$APKSIGNER" sign --ks "$KEYSTORE_PATH" --ks-key-alias "$ANDROID_KEY_ALIAS" \
+            --ks-pass env:ANDROID_KEYSTORE_PASSWORD --key-pass env:ANDROID_KEY_PASSWORD \
+            --out "$SIGNED_APK" "$APK"
+          "$APKSIGNER" verify --verbose --print-certs "$SIGNED_APK"
+          mv "$SIGNED_APK" "$APK"
+      - name: Verify Android APK signature
+        run: |
+          SDK_ROOT="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-}}"
+          test -n "$SDK_ROOT"
+          APKSIGNER="$(find "$SDK_ROOT/build-tools" -type f -name apksigner | sort -V | tail -n 1)"
+          test -x "$APKSIGNER"
+          "$APKSIGNER" verify --verbose --print-certs mobile/build/app/outputs/flutter-apk/app-release.apk
       - name: Record Android artifact checksum and build provenance
         run: |
-          sha256sum mobile/build/app/outputs/flutter-apk/app-release.apk > mobile/build/app/outputs/flutter-apk/SHA256SUMS.txt
-          printf '{"commit":"%s","ref":"%s","flutter":"3.44.9","signed":false}\n' "$GITHUB_SHA" "$GITHUB_REF" > mobile/build/app/outputs/flutter-apk/build-provenance.json
+          APK="mobile/build/app/outputs/flutter-apk/app-release.apk"
+          sha256sum "$APK" > mobile/build/app/outputs/flutter-apk/SHA256SUMS.txt
+          PRODUCTION_SIGNED=false
+          SIGNING_IDENTITY=debug
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then PRODUCTION_SIGNED=true; SIGNING_IDENTITY=release; fi
+          printf '{"commit":"%s","ref":"%s","flutter":"3.44.9","signed":true,"production_signed":%s,"signing_identity":"%s"}\n' \
+            "$GITHUB_SHA" "$GITHUB_REF" "$PRODUCTION_SIGNED" "$SIGNING_IDENTITY" > mobile/build/app/outputs/flutter-apk/build-provenance.json
       - name: Prepare release APK
         if: startsWith(github.ref, 'refs/tags/v')
         run: |
           cp mobile/build/app/outputs/flutter-apk/app-release.apk LunaGuard-Android.apk
           sha256sum LunaGuard-Android.apk > LunaGuard-Android.apk.sha256
+          cp mobile/build/app/outputs/flutter-apk/build-provenance.json LunaGuard-Android.build-provenance.json
       - uses: actions/upload-artifact@v4
         with:
           name: LunaGuard-Android
@@ -70,6 +118,7 @@ jobs:
           path: |
             LunaGuard-Android.apk
             LunaGuard-Android.apk.sha256
+            LunaGuard-Android.build-provenance.json
           if-no-files-found: error
 
   desktop:
@@ -86,8 +135,23 @@ jobs:
         run: python -m unittest -v test_luna test_security
       - name: Build Windows executable
         run: pyinstaller --clean --onefile --noconsole --uac-admin --icon "logo/Luna_Guard.ico" --name LunaGuard --distpath dist/release --collect-all webview --add-data "dashboard.html;." --add-data "locales.json;." --add-data "logo/Luna_Guard.png;logo" --add-data "luna_rules.yar;." --add-data "rules;rules" --add-data "malware_knowledge.json;." luna_app.py
+      - name: Require Windows release signing credentials
+        env:
+          WINDOWS_SIGNING_CERTIFICATE_BASE64: ${{ secrets.WINDOWS_SIGNING_CERTIFICATE_BASE64 }}
+          WINDOWS_SIGNING_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_SIGNING_CERTIFICATE_PASSWORD }}
+        run: |
+          if ([string]::IsNullOrWhiteSpace($env:WINDOWS_SIGNING_CERTIFICATE_BASE64) -or [string]::IsNullOrWhiteSpace($env:WINDOWS_SIGNING_CERTIFICATE_PASSWORD)) {
+            throw "Missing Windows signing secrets. Add WINDOWS_SIGNING_CERTIFICATE_BASE64 and WINDOWS_SIGNING_CERTIFICATE_PASSWORD before tagging a release."
+          }
+        shell: pwsh
+      - name: Sign and verify Windows executable
+        env:
+          WINDOWS_SIGNING_CERTIFICATE_BASE64: ${{ secrets.WINDOWS_SIGNING_CERTIFICATE_BASE64 }}
+          WINDOWS_SIGNING_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_SIGNING_CERTIFICATE_PASSWORD }}
+        run: ./scripts/sign_windows.ps1 -Artifact dist/release/LunaGuard.exe
+        shell: pwsh
       - name: Record executable checksum and build provenance
-        run: python scripts/record_build.py dist/release/LunaGuard.exe
+        run: python scripts/record_build.py dist/release/LunaGuard.exe --signed
       - uses: actions/upload-artifact@v4
         with:
           name: LunaGuard-Windows
@@ -115,7 +179,7 @@ jobs:
           files: |
             release-assets/android/LunaGuard-Android.apk
             release-assets/android/LunaGuard-Android.apk.sha256
-            release-assets/android/build-provenance.json
+            release-assets/android/LunaGuard-Android.build-provenance.json
             release-assets/windows/LunaGuard.exe
             release-assets/windows/SHA256SUMS.txt
             release-assets/windows/build-provenance.json

@@ -167,7 +167,7 @@ class ScanCompletenessTests(unittest.TestCase):
 
 
 class BuildProvenanceTests(unittest.TestCase):
-    def test_build_manifest_has_verified_sha_and_explicit_unsigned_status(self):
+    def test_build_manifest_has_verified_sha_and_explicit_production_signing_status(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             artifact = root / "example.bin"
@@ -181,6 +181,7 @@ class BuildProvenanceTests(unittest.TestCase):
             self.assertIn(digest, manifest)
             self.assertEqual(provenance["sha256"], digest)
             self.assertFalse(provenance["signed"])
+            self.assertFalse(provenance["production_signed"])
 
 
 class DashboardSecurityTests(unittest.TestCase):

@@ -594,6 +594,26 @@ class T(unittest.TestCase):
         self.assertTrue(created)
         self.assertTrue(all(not path.exists() for path in created))
 
+    def test45_full_coverage_walk_includes_system_and_cache_directories(self):
+        root = TMP / "full-coverage"
+        files = {
+            "Windows/Temp/system.exe",
+            "Cache/cache.exe",
+            "$Recycle.Bin/recycled.exe",
+            "System Volume Information/restore.exe",
+        }
+        for relative in files:
+            path = root / Path(relative)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(b"data")
+
+        with mock.patch.dict(os.environ, {"WINDIR": str(root / "Windows")}):
+            regular = {Path(path).relative_to(root).as_posix() for path in lg.walk_files([str(root)])}
+            full = {Path(path).relative_to(root).as_posix()
+                    for path in lg.walk_files([str(root)], full_coverage=True)}
+        self.assertFalse(regular & files, "focused scans should keep their established folder skips")
+        self.assertEqual(full, files, "full coverage must include system and cache folders")
+
     def test28_defender_status_and_scan_commands_are_validated(self):
         completed = __import__("subprocess").CompletedProcess(
             args=[], returncode=0,

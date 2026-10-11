@@ -18,7 +18,7 @@ flutter build apk --release
 
 For iOS, run `flutter build ios --release --no-codesign` from the `mobile` directory on macOS with Xcode. An installable or App Store-distributable iOS build additionally needs Apple signing credentials and provisioning.
 
-The GitHub Actions workflow builds and tests the Android APK on Linux and compiles the unsigned iOS app on macOS. Its generated native platform projects are intentionally ignored; the shared Flutter source and platform configuration are kept here.
+The GitHub Actions workflow builds and tests the Android APK on Linux and compiles the unsigned iOS app on macOS. Tagged releases require the repository's Android release keystore secrets; the workflow signs and verifies the APK before it can be published. Keep a secure backup of that keystore and continue using the same signing key for future app updates. Ordinary branch artifacts are not production-signed. Its generated native platform projects are intentionally ignored; the shared Flutter source and platform configuration are kept here.
 
 ## Scope and privacy
 
