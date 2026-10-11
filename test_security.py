@@ -225,6 +225,7 @@ class BuildProvenanceTests(unittest.TestCase):
             self.assertEqual(provenance["sha256"], digest)
             self.assertFalse(provenance["signed"])
             self.assertFalse(provenance["production_signed"])
+            self.assertEqual(provenance["signing_identity"], "unsigned")
 
 
 class DashboardSecurityTests(unittest.TestCase):

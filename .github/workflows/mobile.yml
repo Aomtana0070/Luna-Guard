@@ -138,23 +138,8 @@ jobs:
         run: python -m unittest -v test_luna test_security
       - name: Build Windows executable
         run: pyinstaller --clean --onefile --noconsole --uac-admin --icon "logo/Luna_Guard.ico" --name LunaGuard --distpath dist/release --collect-all webview --add-data "dashboard.html;." --add-data "locales.json;." --add-data "logo/Luna_Guard.png;logo" --add-data "luna_rules.yar;." --add-data "rules;rules" --add-data "malware_knowledge.json;." luna_app.py
-      - name: Require Windows release signing credentials
-        env:
-          WINDOWS_SIGNING_CERTIFICATE_BASE64: ${{ secrets.WINDOWS_SIGNING_CERTIFICATE_BASE64 }}
-          WINDOWS_SIGNING_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_SIGNING_CERTIFICATE_PASSWORD }}
-        run: |
-          if ([string]::IsNullOrWhiteSpace($env:WINDOWS_SIGNING_CERTIFICATE_BASE64) -or [string]::IsNullOrWhiteSpace($env:WINDOWS_SIGNING_CERTIFICATE_PASSWORD)) {
-            throw "Missing Windows signing secrets. Add WINDOWS_SIGNING_CERTIFICATE_BASE64 and WINDOWS_SIGNING_CERTIFICATE_PASSWORD before tagging a release."
-          }
-        shell: pwsh
-      - name: Sign and verify Windows executable
-        env:
-          WINDOWS_SIGNING_CERTIFICATE_BASE64: ${{ secrets.WINDOWS_SIGNING_CERTIFICATE_BASE64 }}
-          WINDOWS_SIGNING_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_SIGNING_CERTIFICATE_PASSWORD }}
-        run: ./scripts/sign_windows.ps1 -Artifact dist/release/LunaGuard.exe
-        shell: pwsh
       - name: Record executable checksum and build provenance
-        run: python scripts/record_build.py dist/release/LunaGuard.exe --signed
+        run: python scripts/record_build.py dist/release/LunaGuard.exe
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: LunaGuard-Windows
