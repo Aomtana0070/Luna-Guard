@@ -105,7 +105,7 @@ jobs:
           cp mobile/build/app/outputs/flutter-apk/app-release.apk LunaGuard-Android.apk
           sha256sum LunaGuard-Android.apk > LunaGuard-Android.apk.sha256
           cp mobile/build/app/outputs/flutter-apk/build-provenance.json LunaGuard-Android.build-provenance.json
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: LunaGuard-Android
           path: |
@@ -113,7 +113,7 @@ jobs:
             mobile/build/app/outputs/flutter-apk/SHA256SUMS.txt
             mobile/build/app/outputs/flutter-apk/build-provenance.json
           if-no-files-found: error
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: startsWith(github.ref, 'refs/tags/v')
         with:
           name: LunaGuard-Android-Release
@@ -140,7 +140,7 @@ jobs:
         run: pyinstaller --clean --onefile --noconsole --uac-admin --icon "logo/Luna_Guard.ico" --name LunaGuard --distpath dist/release --collect-all webview --add-data "dashboard.html;." --add-data "locales.json;." --add-data "logo/Luna_Guard.png;logo" --add-data "luna_rules.yar;." --add-data "rules;rules" --add-data "malware_knowledge.json;." luna_app.py
       - name: Record executable checksum and build provenance
         run: python scripts/record_build.py dist/release/LunaGuard.exe
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: LunaGuard-Windows
           path: dist/release/*
