@@ -13,6 +13,7 @@ from urllib.request import Request, urlopen
 from unittest import mock
 
 import luna_dashboard as dashboard
+import luna_app as app
 import luna_quarantine as quarantine
 import luna_guard as lg
 
@@ -150,6 +151,48 @@ class ThreatLifecycleTests(unittest.TestCase):
                 lg.APP_DIR, lg.DB_PATH = old_app_dir, old_db_path
 
 
+class SecretStorageTests(unittest.TestCase):
+    def test_windows_api_key_config_uses_protected_value_and_reads_legacy_keys(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            config = root / "config.json"
+            with mock.patch.object(lg, "IS_WIN", True), mock.patch.object(lg, "APP_DIR", root), \
+                    mock.patch.object(lg, "CONFIG", config), mock.patch.object(lg, "_protect_key", return_value="ciphertext") as protect:
+                lg.save_key("  sample-key  ")
+                saved = json.loads(config.read_text(encoding="utf-8"))
+                self.assertEqual(saved, {"abusech_key_dpapi": "ciphertext"})
+                protect.assert_called_once_with("sample-key")
+                with mock.patch.object(lg, "_unprotect_key", return_value="sample-key") as unprotect:
+                    self.assertEqual(lg.get_key(), "sample-key")
+                    unprotect.assert_called_once_with("ciphertext")
+                config.write_text(json.dumps({"abusech_key": "legacy-key"}), encoding="utf-8")
+                self.assertEqual(lg.get_key(), "legacy-key")
+                self.assertEqual(json.loads(config.read_text(encoding="utf-8")),
+                                 {"abusech_key_dpapi": "ciphertext"})
+                self.assertEqual(protect.call_count, 2)
+
+    def test_corrupt_protected_key_does_not_fall_back_to_environment_secret(self):
+        with tempfile.TemporaryDirectory() as directory:
+            config = Path(directory) / "config.json"
+            config.write_text(json.dumps({"abusech_key_dpapi": "invalid"}), encoding="utf-8")
+            with mock.patch.object(lg, "CONFIG", config), mock.patch.dict("os.environ", {"ABUSECH_KEY": "fallback-key"}), \
+                    mock.patch.object(lg, "_unprotect_key", side_effect=ValueError("bad ciphertext")):
+                self.assertEqual(lg.get_key(), "")
+
+
+class DesktopServerTests(unittest.TestCase):
+    def test_desktop_binds_the_bounded_server_to_loopback(self):
+        with mock.patch.object(dashboard, "check_quarantine_recovery"):
+            server, url = app.serve()
+        try:
+            self.assertIsInstance(server, dashboard.BoundedThreadingHTTPServer)
+            self.assertEqual(server.server_address[0], "127.0.0.1")
+            self.assertTrue(url.startswith("http://127.0.0.1:"))
+        finally:
+            server.shutdown()
+            server.server_close()
+
+
 class ScanCompletenessTests(unittest.TestCase):
     def test_failed_required_system_command_marks_scan_incomplete(self):
         old_audit = dict(lg.SCAN_AUDIT)
@@ -256,6 +299,41 @@ class DashboardSecurityTests(unittest.TestCase):
             "Origin": "http://attacker.invalid",
         })
         self.assertEqual(status, 403)
+
+    def test_dashboard_has_request_scoped_nonce_and_no_inline_handlers(self):
+        status, headers, body = self.request("/")
+        self.assertEqual(status, 200)
+        page = body.decode("utf-8")
+        policy = headers.get("Content-Security-Policy", "")
+        match = __import__("re").search(r"script-src 'self' 'nonce-([^']+)'", policy)
+        self.assertIsNotNone(match)
+        self.assertIn(f'<script nonce="{match.group(1)}">', page)
+        self.assertNotIn("'unsafe-inline'", policy.split("script-src", 1)[1].split(";", 1)[0])
+        self.assertNotRegex(page, r"\bon(?:click|change|input)=")
+        self.assertIn('data-quarantine-action="restore" data-id="${esc(q.id)}"', page)
+
+    def test_untrusted_severity_is_not_used_as_a_css_class(self):
+        html = (Path(__file__).resolve().parent / "dashboard.html").read_text(encoding="utf-8")
+        self.assertIn("severity=['high','medium','low'].includes(f.sev)?f.sev:'low'", html)
+
+    def test_bounded_server_refuses_connections_after_worker_limit(self):
+        class OneWorkerServer(dashboard.BoundedThreadingHTTPServer):
+            max_workers = 1
+
+        server = OneWorkerServer(("127.0.0.1", 0), dashboard.H)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        self.assertTrue(server._request_slots.acquire(blocking=False))
+        try:
+            with self.assertRaises(HTTPError) as error:
+                urlopen(f"http://127.0.0.1:{server.server_address[1]}/", timeout=5)
+            self.assertEqual(error.exception.code, 503)
+            error.exception.close()
+        finally:
+            server._request_slots.release()
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=5)
 
     def test_unsupported_http_method_is_405(self):
         status, headers, _ = self.request("/api/state", headers={"X-Luna-Token": dashboard.TOKEN}, method="PUT")

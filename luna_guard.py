@@ -17,6 +17,7 @@ Luna Guard - ตัวตรวจจับและกำจัด XWorm + ม�
 Settings จะใช้คีย์ที่บันทึกไว้ก่อน; ใช้ setx ABUSECH_KEY "คีย์ของคุณ" เป็นทางเลือกเมื่อไม่มีคีย์ใน Settings
 """
 import argparse
+import base64
 from collections import Counter
 import csv
 import datetime as dt
@@ -337,12 +338,82 @@ SKIP_DIRS = {"cache", "code cache", "gpucache", "node_modules", ".git", "__pycac
 def get_key():
     """Prefer the key saved in Settings; use ABUSECH_KEY only when no saved key exists."""
     try:
-        saved = json.loads(CONFIG.read_text(encoding="utf-8")).get("abusech_key", "").strip()
+        config = json.loads(CONFIG.read_text(encoding="utf-8"))
+        if isinstance(config, dict) and "abusech_key_dpapi" in config:
+            try:
+                return _unprotect_key(config["abusech_key_dpapi"]).strip()
+            except (OSError, ValueError, TypeError):
+                return ""
+        saved = config.get("abusech_key", "").strip() if isinstance(config, dict) else ""
         if saved:
+            if IS_WIN:
+                try:
+                    save_key(saved)
+                except (OSError, ValueError):
+                    pass
             return saved
     except (OSError, ValueError, TypeError, AttributeError):
         pass
     return os.environ.get("ABUSECH_KEY", "").strip()
+
+
+def _dpapi(plaintext=None, ciphertext=None):
+    """Protect/unprotect bytes with the current Windows user's DPAPI profile."""
+    if not IS_WIN:
+        raise OSError("Windows DPAPI is unavailable")
+    import ctypes
+    from ctypes import wintypes
+
+    class DataBlob(ctypes.Structure):
+        _fields_ = [("cbData", wintypes.DWORD),
+                    ("pbData", ctypes.POINTER(ctypes.c_ubyte))]
+
+    crypt32 = ctypes.WinDLL("crypt32", use_last_error=True)
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    protect = crypt32.CryptProtectData
+    unprotect = crypt32.CryptUnprotectData
+    protect.argtypes = [ctypes.POINTER(DataBlob), wintypes.LPCWSTR,
+                        ctypes.POINTER(DataBlob), ctypes.c_void_p, ctypes.c_void_p,
+                        wintypes.DWORD, ctypes.POINTER(DataBlob)]
+    protect.restype = wintypes.BOOL
+    unprotect.argtypes = [ctypes.POINTER(DataBlob), ctypes.POINTER(wintypes.LPWSTR),
+                          ctypes.POINTER(DataBlob), ctypes.c_void_p, ctypes.c_void_p,
+                          wintypes.DWORD, ctypes.POINTER(DataBlob)]
+    unprotect.restype = wintypes.BOOL
+    kernel32.LocalFree.argtypes = [ctypes.c_void_p]
+    kernel32.LocalFree.restype = ctypes.c_void_p
+
+    if plaintext is not None:
+        raw = plaintext
+        buffer = ctypes.create_string_buffer(raw)
+        source = DataBlob(len(raw), ctypes.cast(buffer, ctypes.POINTER(ctypes.c_ubyte)))
+        operation = lambda output: protect(ctypes.byref(source), None, None, None, None, 1, ctypes.byref(output))
+    else:
+        raw = ciphertext
+        buffer = ctypes.create_string_buffer(raw)
+        source = DataBlob(len(raw), ctypes.cast(buffer, ctypes.POINTER(ctypes.c_ubyte)))
+        operation = lambda output: unprotect(ctypes.byref(source), None, None, None, None, 1, ctypes.byref(output))
+    output = DataBlob()
+    if not operation(output):
+        raise ctypes.WinError(ctypes.get_last_error())
+    try:
+        return ctypes.string_at(output.pbData, output.cbData)
+    finally:
+        kernel32.LocalFree(output.pbData)
+
+
+def _protect_key(key):
+    return base64.b64encode(_dpapi(plaintext=key.encode("utf-8"))).decode("ascii")
+
+
+def _unprotect_key(encoded):
+    if not isinstance(encoded, str) or len(encoded) > 4096:
+        raise ValueError("invalid protected API key")
+    try:
+        encrypted = base64.b64decode(encoded, validate=True)
+    except (ValueError, base64.binascii.Error) as error:
+        raise ValueError("invalid protected API key") from error
+    return _dpapi(ciphertext=encrypted).decode("utf-8")
 
 
 def save_key(k):
@@ -352,7 +423,10 @@ def save_key(k):
     fd, temp_name = tempfile.mkstemp(prefix="config-", suffix=".tmp", dir=APP_DIR)
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as stream:
-            json.dump({"abusech_key": k.strip()}, stream, ensure_ascii=False)
+            value = k.strip()
+            record = ({"abusech_key_dpapi": _protect_key(value)} if IS_WIN
+                      else {"abusech_key": value})
+            json.dump(record, stream, ensure_ascii=False)
             stream.flush()
             os.fsync(stream.fileno())
         if os.name != "nt":
