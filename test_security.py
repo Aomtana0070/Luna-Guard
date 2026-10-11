@@ -67,7 +67,7 @@ class QuarantineTests(unittest.TestCase):
 
     def test_restore_to_explicit_existing_parent(self):
         item_id = self.quarantine()
-        destination = self.root / "restored.bin"
+        destination = (self.root / "restored.bin").resolve()
         restored = quarantine.restore_file(item_id, self.qdir, self.index, destination)
         self.assertEqual(restored, destination)
         self.assertEqual(destination.read_bytes(), self.payload)
