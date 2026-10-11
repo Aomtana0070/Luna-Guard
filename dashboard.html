@@ -67,9 +67,9 @@ input,select{background:#0a111b;border:1px solid var(--line);color:var(--tx);pad
  <input id="key" type="password" data-i18n-placeholder="settings.keyPlaceholder" placeholder="วางคีย์ที่นี่"><div class="btns"><button class="b p" data-i18n="settings.save" onclick="saveKey()">บันทึก</button></div><p class="mu" id="keyst"></p></div></section>
 </main>
 <script>
-const T=new URLSearchParams(location.search).get('t'),$=i=>document.getElementById(i),esc=s=>String(s).replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));
-const logo=$('brandLogo');logo.src='/logo/Luna_Guard.png?t='+encodeURIComponent(T||'');logo.addEventListener('error',()=>{logo.hidden=true;console.error('Luna Guard logo could not be loaded')},{once:true});
-const api=(p,b)=>fetch('/api/'+p,{method:b?'POST':'GET',headers:{'X-T':T},body:b?JSON.stringify(b):undefined}).then(r=>r.json());
+const T=new URLSearchParams(location.hash.slice(1)).get('t')||'';if(location.hash)history.replaceState(null,'',location.pathname);const $=i=>document.getElementById(i),esc=s=>String(s).replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));
+const logo=$('brandLogo');logo.src='/logo/Luna_Guard.png';logo.addEventListener('error',()=>{logo.hidden=true;console.error('Luna Guard logo could not be loaded')},{once:true});
+const api=(p,b)=>fetch('/api/'+p,{method:b?'POST':'GET',headers:b?{'X-T':T,'Content-Type':'application/json'}:{'X-T':T},body:b?JSON.stringify(b):undefined}).then(r=>r.json());
 let locale={},currentLanguage='th',currentTab='dash';
 function t(key,values={}){const text=(locale[currentLanguage]||locale.th||{})[key]||key;return text.replace(/\{(\w+)\}/g,(_,name)=>values[name]??'')}
 function applyLanguage(language){currentLanguage=locale[language]?language:'th';document.documentElement.lang=currentLanguage;$('language').value=currentLanguage;document.querySelectorAll('[data-i18n]').forEach(el=>{el.textContent=t(el.dataset.i18n)});document.querySelectorAll('[data-i18n-placeholder]').forEach(el=>{el.placeholder=t(el.dataset.i18nPlaceholder)});$('nav').innerHTML=[['dash','nav.dashboard'],['quar','nav.quarantine'],['log','nav.log'],['guide','nav.guide'],['set','nav.settings']].map(([k,key])=>`<button data-k="${k}" onclick="go('${k}')">${t(key)}</button>`).join('');go(currentTab)}

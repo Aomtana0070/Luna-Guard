@@ -3,6 +3,7 @@
 import argparse, contextlib, ctypes, json, re, secrets, shutil, subprocess, sys, tempfile, threading, time, webbrowser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from urllib.parse import parse_qs, urlsplit
 import luna_guard as lg
 
 BASE = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent))
@@ -11,6 +12,11 @@ TOKEN = secrets.token_urlsafe(16)
 LANGUAGES = {"th", "en", "zh-CN"}
 LANGUAGE_FILE = lg.APP_DIR / "settings.json"
 DEFENDER_STATUS = {"checked": 0.0, "value": {"available": False}}
+MAX_API_BODY_BYTES = 64 * 1024
+API_RATE_WINDOW_SECONDS = 60
+API_RATE_LIMIT = 240
+API_REQUESTS = {}
+API_REQUESTS_LOCK = threading.Lock()
 
 
 def get_language():
@@ -157,51 +163,182 @@ def start_defender_scan(scan_type):
 
 
 def state():
-    con = lg.db(); g = lambda k: (con.execute("SELECT v FROM meta WHERE k=?", (k,)).fetchone() or [None])[0]
+    con = lg.db()
     try:
-        hist = json.loads(lg.HISTORY.read_text(encoding="utf-8"))
-        if not isinstance(hist, list):
-            raise ValueError("รูปแบบประวัติไม่ใช่รายการ")
-        S["history_error"] = None
-    except (OSError, ValueError) as e:
-        message = str(e)
-        if S["history_error"] != message:
-            log(f"[!] อ่านประวัติการสแกนไม่สำเร็จ: {message}")
-        S["history_error"] = message
-        hist = []
-    hist = [item for item in hist if isinstance(item, dict)]
-    last = lg.LAST_SCAN or (hist[-1] if hist else {})
-    r = {"hashes": con.execute("SELECT COUNT(*) FROM hashes").fetchone()[0], "iocs": con.execute("SELECT COUNT(*) FROM iocs").fetchone()[0],
-         "updated": g("last_update"), "key": bool(lg.get_key()), "yara": bool(lg.yara_rules()), "admin": is_admin(), "job": S["job"],
-         "defender": defender_status(),
-         "hist": hist[-20:], "last": last, "quar": [{"id": k, **v} for k, v in lg.load_index().items()], "self": S["self"], "prog": dict(lg.PROGRESS), "n": len(S["log"]), "language": get_language()}
-    con.close(); return r
+        g = lambda k: (con.execute("SELECT v FROM meta WHERE k=?", (k,)).fetchone() or [None])[0]
+        try:
+            hist = json.loads(lg.HISTORY.read_text(encoding="utf-8"))
+            if not isinstance(hist, list):
+                raise ValueError("รูปแบบประวัติไม่ใช่รายการ")
+            S["history_error"] = None
+        except (OSError, ValueError) as e:
+            message = str(e)
+            if S["history_error"] != message:
+                log(f"[!] อ่านประวัติการสแกนไม่สำเร็จ: {message}")
+            S["history_error"] = message
+            hist = []
+        hist = [item for item in hist if isinstance(item, dict)]
+        last = lg.LAST_SCAN or (hist[-1] if hist else {})
+        return {
+            "hashes": con.execute("SELECT COUNT(*) FROM hashes").fetchone()[0],
+            "iocs": con.execute("SELECT COUNT(*) FROM iocs").fetchone()[0],
+            "updated": g("last_update"),
+            "key": bool(lg.get_key()),
+            "yara": bool(lg.yara_rules()),
+            "admin": is_admin(),
+            "job": S["job"],
+            "defender": defender_status(),
+            "hist": hist[-20:],
+            "last": last,
+            "quar": [{"id": k, **v} for k, v in lg.load_index().items()],
+            "self": S["self"],
+            "prog": dict(lg.PROGRESS),
+            "n": len(S["log"]),
+            "language": get_language(),
+        }
+    finally:
+        con.close()
 
 
 class H(BaseHTTPRequestHandler):
     def log_message(s, *a): pass
+    def local_request(s):
+        host = s.headers.get("Host", "").lower()
+        port = s.server.server_address[1]
+        if host not in (f"127.0.0.1:{port}", f"localhost:{port}"):
+            return False
+        origin = s.headers.get("Origin")
+        if origin is None:
+            return True
+        try:
+            parsed = urlsplit(origin)
+        except ValueError:
+            return False
+        return (
+            parsed.scheme == "http"
+            and parsed.netloc.lower() == host
+            and parsed.path in ("", "/")
+            and not parsed.query
+            and not parsed.fragment
+        )
     def auth(s):
-        q = re.search(r"[?&]t=([^&]+)", s.path)
-        return s.headers.get("Host", "").split(":")[0] in ("127.0.0.1", "localhost") and (s.headers.get("X-T") == TOKEN or (q and q.group(1) == TOKEN))
+        supplied = s.headers.get("X-T", "")
+        return s.local_request() and secrets.compare_digest(supplied, TOKEN)
+    def rate_limited(s):
+        key = (s.client_address[0], s.command)
+        now = time.monotonic()
+        with API_REQUESTS_LOCK:
+            for old_key, stamps in list(API_REQUESTS.items()):
+                if not stamps or now - stamps[-1] >= API_RATE_WINDOW_SECONDS:
+                    API_REQUESTS.pop(old_key, None)
+            recent = [stamp for stamp in API_REQUESTS.get(key, [])
+                      if now - stamp < API_RATE_WINDOW_SECONDS]
+            if len(recent) >= API_RATE_LIMIT:
+                API_REQUESTS[key] = recent
+                return True
+            recent.append(now)
+            API_REQUESTS[key] = recent
+        return False
     def out(s, code, body, ct="application/json"):
         b = body if isinstance(body, bytes) else json.dumps(body, ensure_ascii=False).encode()
         s.send_response(code); s.send_header("Content-Type", ct + "; charset=utf-8"); s.send_header("Content-Length", str(len(b)))
-        s.send_header("Cache-Control", "no-store"); s.end_headers(); s.wfile.write(b)
+        s.send_header("Cache-Control", "no-store")
+        s.send_header("X-Content-Type-Options", "nosniff")
+        s.send_header("Referrer-Policy", "no-referrer")
+        s.end_headers()
+        try:
+            s.wfile.write(b)
+        except (BrokenPipeError, ConnectionResetError):
+            pass
+    def read_json(s):
+        if s.headers.get("Transfer-Encoding"):
+            s.out(400, {"ok": False, "error": "transfer encoding is not supported"})
+            return None
+        length_header = s.headers.get("Content-Length")
+        if length_header is None or not length_header.isdigit():
+            s.out(411, {"ok": False, "error": "valid content length is required"})
+            return None
+        length = int(length_header)
+        if length > MAX_API_BODY_BYTES:
+            if length <= MAX_API_BODY_BYTES * 2:
+                previous_timeout = s.connection.gettimeout()
+                try:
+                    s.connection.settimeout(1)
+                    remaining = length
+                    while remaining:
+                        chunk = s.rfile.read(min(remaining, 64 * 1024))
+                        if not chunk:
+                            break
+                        remaining -= len(chunk)
+                except OSError:
+                    s.close_connection = True
+                finally:
+                    s.connection.settimeout(previous_timeout)
+            else:
+                s.close_connection = True
+            s.out(413, {"ok": False, "error": "request body is too large"})
+            return None
+        if s.headers.get_content_type() != "application/json":
+            s.out(415, {"ok": False, "error": "application/json is required"})
+            return None
+        try:
+            data = json.loads(s.rfile.read(length) if length else b"{}")
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            s.out(400, {"ok": False, "error": "invalid JSON body"})
+            return None
+        if not isinstance(data, dict):
+            s.out(400, {"ok": False, "error": "JSON body must be an object"})
+            return None
+        return data
     def do_GET(s):
-        if not s.auth(): return s.out(403, {"error": "forbidden"})
-        p = s.path.split("?")[0]
+        if not s.local_request():
+            return s.out(403, {"error": "forbidden"})
+        try:
+            parsed_path = urlsplit(s.path)
+            p = parsed_path.path
+            query = parse_qs(parsed_path.query, strict_parsing=True) if parsed_path.query else {}
+        except ValueError:
+            return s.out(400, {"error": "invalid request path"})
         if p == "/": return s.out(200, (BASE / "dashboard.html").read_bytes(), "text/html")
-        if p == "/logo/Luna_Guard.png": return s.out(200, (BASE / "logo" / "Luna_Guard.png").read_bytes(), "image/png")
-        if p == "/api/locales": return s.out(200, json.loads((BASE / "locales.json").read_text(encoding="utf-8")))
-        if p == "/api/state": return s.out(200, state())
-        if p == "/api/log":
-            m = re.search(r"since=(\d+)", s.path); return s.out(200, {"lines": S["log"][int(m.group(1)) if m else 0:]})
+        if p == "/logo/Luna_Guard.png" and not query:
+            return s.out(200, (BASE / "logo" / "Luna_Guard.png").read_bytes(), "image/png")
+        if not s.auth(): return s.out(403, {"error": "forbidden"})
+        if s.rate_limited(): return s.out(429, {"error": "rate limit exceeded"})
+        if p == "/api/locales" and not query:
+            return s.out(200, json.loads((BASE / "locales.json").read_text(encoding="utf-8")))
+        if p == "/api/state" and not query:
+            try:
+                return s.out(200, state())
+            except (OSError, RuntimeError, ValueError) as e:
+                log(f"[!] อ่านสถานะภายในไม่สำเร็จ: {e}")
+                return s.out(500, {"error": "could not read application state"})
+        if p == "/api/log" and set(query) <= {"since"}:
+            try:
+                since = int(query.get("since", ["0"])[0])
+            except (ValueError, IndexError):
+                return s.out(400, {"error": "invalid log cursor"})
+            if since < 0:
+                return s.out(400, {"error": "invalid log cursor"})
+            return s.out(200, {"lines": S["log"][since:]})
         s.out(404, {"error": "not found"})
     def do_POST(s):
         if not s.auth(): return s.out(403, {"error": "forbidden"})
-        d = json.loads(s.rfile.read(int(s.headers.get("Content-Length", 0))) or b"{}"); p = s.path.split("?")[0]; ok = True
+        if s.rate_limited(): return s.out(429, {"error": "rate limit exceeded"})
+        if urlsplit(s.path).query:
+            return s.out(400, {"ok": False, "error": "query parameters are not accepted"})
+        d = s.read_json()
+        if d is None: return
+        p = urlsplit(s.path).path; ok = True
         if p == "/api/update": ok = start("อัปเดตฐานข้อมูล", lg.cmd_update)
         elif p == "/api/scan":
+            if any(key in d and not isinstance(d[key], bool) for key in ("files_only", "clean", "full")):
+                return s.out(400, {"ok": False, "error": "scan flags must be booleans"})
+            if "paths" in d and (
+                not isinstance(d["paths"], list)
+                or len(d["paths"]) > 100
+                or any(not isinstance(path, str) or len(path) > 32768 for path in d["paths"])
+            ):
+                return s.out(400, {"ok": False, "error": "invalid scan paths"})
             files_only = bool(d.get("files_only"))
             clean = bool(d.get("clean"))
             full = bool(d.get("full"))
@@ -227,21 +364,32 @@ class H(BaseHTTPRequestHandler):
                 lambda: start_defender_scan(scan_type),
             )
         elif p == "/api/restore":
+            if not isinstance(d.get("id"), str):
+                return s.out(400, {"ok": False, "error": "invalid quarantine id"})
             try:
                 with contextlib.redirect_stdout(W()): lg.cmd_restore(type("A", (), {"id": d.get("id", "")})())
-            except (SystemExit, OSError) as e: log(f"[!] {e}")
+            except (SystemExit, OSError, RuntimeError, ValueError) as e:
+                log(f"[!] {e}")
+                return s.out(400, {"ok": False, "error": str(e)})
         elif p in ("/api/remove", "/api/allow"):
+            if not isinstance(d.get("path"), str) or len(d["path"]) > 32768:
+                return s.out(400, {"ok": False, "error": "invalid file path"})
             ok = not S["job"]
             if ok:
                 try:
                     with contextlib.redirect_stdout(W()): (lg.remove_finding if p == "/api/remove" else lg.allow_file)(d.get("path", ""))
-                except (SystemExit, OSError) as e: log(f"[!] {e}")
+                except (SystemExit, OSError, RuntimeError, ValueError) as e:
+                    log(f"[!] {e}")
+                    return s.out(400, {"ok": False, "error": str(e)})
         elif p == "/api/stop":
             lg.STOP["flag"] = True; log("[!] สั่งหยุดสแกนไฟล์แล้ว...")
         elif p == "/api/elevate":
             try: elevate()
             except Exception as e: log(f"[!] ขอสิทธิ์ Admin ไม่สำเร็จ: {e}")
-        elif p == "/api/key": lg.save_key(d.get("key", "")); log("[+] บันทึกคีย์แล้ว")
+        elif p == "/api/key":
+            if not isinstance(d.get("key"), str) or len(d["key"]) > 2048:
+                return s.out(400, {"ok": False, "error": "invalid API key"})
+            lg.save_key(d["key"]); log("[+] บันทึกคีย์แล้ว")
         elif p == "/api/language":
             try:
                 set_language(d.get("language"))
@@ -252,12 +400,17 @@ class H(BaseHTTPRequestHandler):
                 return s.out(500, {"ok": False, "error": "could not save language"})
         else: return s.out(404, {"error": "not found"})
         s.out(200 if ok else 409, {"ok": ok})
+    def do_OPTIONS(s):
+        s.send_response(405)
+        s.send_header("Allow", "GET, POST")
+        s.send_header("Content-Length", "0")
+        s.end_headers()
 
 
 if __name__ == "__main__":
     ap = argparse.ArgumentParser(description="Luna Guard local dashboard API (desktop UI is launched with luna_app.py)")
     ap.add_argument("--port", type=int, default=0); ap.add_argument("--open-browser", action="store_true")
     a = ap.parse_args(); srv = ThreadingHTTPServer(("127.0.0.1", a.port), H)
-    url = f"http://127.0.0.1:{srv.server_address[1]}/?t={TOKEN}"; print("Luna Guard Dashboard:", url)
+    url = f"http://127.0.0.1:{srv.server_address[1]}/#t={TOKEN}"; print("Luna Guard Dashboard:", url)
     if a.open_browser: webbrowser.open(url)
     srv.serve_forever()
