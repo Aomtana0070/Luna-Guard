@@ -1722,12 +1722,15 @@ def cmd_scan(args):
             item["risk_band"] = item["analysis"].get("risk_band", "CLEAN / UNKNOWN")
         saved_findings.append(item)
     saved_findings.extend(archive_findings)
+    totals = {level: sum(f["sev"] == level for f in saved_findings) for level in ("high", "medium", "low")}
+    pending_findings = sum(f["kind"] == "ไฟล์" for f in saved_findings)
     LAST_SCAN.clear()
     LAST_SCAN.update(
         scan_id=scan_id, started_at=scan_started,
         time=dt.datetime.now().astimezone().isoformat(timespec="seconds"), files=count, clean=clean,
         scope="files" if files_only else "system",
         deep_archives=deep_archives,
+        findings_total=len(saved_findings), pending=pending_findings, **totals,
         findings=saved_findings, complete=SCAN_AUDIT["issues"] == 0, issues=SCAN_AUDIT["issues"],
         audit={"details": list(SCAN_AUDIT["details"]), "memory": dict(SCAN_AUDIT["memory"]),
                "files_analyzed": SCAN_AUDIT["files_analyzed"], "files_skipped": SCAN_AUDIT["files_skipped"],
@@ -1740,7 +1743,6 @@ def cmd_scan(args):
                           files_skipped=str(SCAN_AUDIT["files_skipped"]), issues=str(LAST_SCAN["issues"]))
     except OSError:
         print("[!] บันทึก scan audit ไม่สำเร็จ")
-    totals = {level: sum(f["sev"] == level for f in saved_findings) for level in ("high", "medium", "low")}
     hist = []
     history_ok = True
     if HISTORY.exists():
@@ -1757,7 +1759,7 @@ def cmd_scan(args):
             "time": LAST_SCAN["time"], "files": count, "clean": clean, "scope": LAST_SCAN["scope"],
             "deep_archives": deep_archives,
             "complete": LAST_SCAN["complete"], "issues": LAST_SCAN["issues"], "audit": LAST_SCAN["audit"],
-            **totals, "findings_total": len(LAST_SCAN["findings"]),
+            **totals, "pending": pending_findings, "findings_total": len(LAST_SCAN["findings"]),
             "findings": LAST_SCAN["findings"][:100],
         })
         try:
@@ -1852,6 +1854,7 @@ def remove_finding(path):
             run(["taskkill", "/F", "/PID", str(p["ProcessId"])])
     qid = quarantine_file(path, sha, [f["why"]])
     LAST_SCAN["findings"].remove(f)
+    _refresh_last_scan_counts()
     print(f"[+] กักกัน {path} -> id {qid}")
     return qid
 
@@ -1867,7 +1870,16 @@ def allow_file(path):
     con.execute("INSERT OR REPLACE INTO allow VALUES(?,?)", (expected, path))
     con.commit()
     LAST_SCAN["findings"].remove(f)
+    _refresh_last_scan_counts()
     print(f"[+] ระบุว่าปลอดภัย: {path}")
+
+
+def _refresh_last_scan_counts():
+    findings = LAST_SCAN.get("findings", [])
+    LAST_SCAN["findings_total"] = len(findings)
+    LAST_SCAN["pending"] = sum(item.get("kind") == "ไฟล์" for item in findings)
+    for severity in ("high", "medium", "low"):
+        LAST_SCAN[severity] = sum(item.get("sev") == severity for item in findings)
 
 
 def ask_user(args):
