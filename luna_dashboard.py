@@ -465,7 +465,8 @@ class H(BaseHTTPRequestHandler):
         p = parsed.path; ok = True
         if p == "/api/update" and not d: ok = start("อัปเดตฐานข้อมูล", lg.cmd_update)
         elif p == "/api/scan":
-            if any(key in d and not isinstance(d[key], bool) for key in ("files_only", "clean", "full")):
+            if any(key in d and not isinstance(d[key], bool)
+                   for key in ("files_only", "clean", "full", "deep_archives")):
                 return s.out(400, {"ok": False, "error": "scan flags must be booleans"})
             if "paths" in d and (not isinstance(d["paths"], list) or len(d["paths"]) > 100
                     or any(not isinstance(item, str) or len(item) > 32768 for item in d["paths"])):
@@ -473,6 +474,7 @@ class H(BaseHTTPRequestHandler):
             files_only = bool(d.get("files_only"))
             clean = bool(d.get("clean"))
             full = bool(d.get("full"))
+            deep_archives = bool(d.get("deep_archives"))
             if files_only and clean:
                 return s.out(400, {"ok": False, "error": "file-only scans are read-only"})
             if files_only and full:
@@ -481,9 +483,12 @@ class H(BaseHTTPRequestHandler):
                 return s.out(400, {"ok": False, "error": "file-only scan uses its predefined folders"})
             a = type("A", (), {
                 "clean": clean, "files_only": files_only, "full": full,
+                "deep_archives": deep_archives,
                 "paths": d.get("paths") or None,
             })()
-            name = "สแกนไฟล์แบบอัตโนมัติ" if files_only else "สแกน+กำจัด" if clean else "สแกน"
+            name = ("สแกน archive ลึก" if deep_archives else
+                    "สแกนไฟล์แบบอัตโนมัติ" if files_only else
+                    "สแกน+กำจัด" if clean else "สแกน")
             ok = start(name, lambda: lg.cmd_scan(a))
         elif p == "/api/selftest" and not d: ok = start("ทดสอบตัวเอง", selftest)
         elif p == "/api/defender-scan":

@@ -66,6 +66,14 @@ MAX_ARCHIVE_EXPANDED_BYTES = 512 * 1024 * 1024
 MAX_ARCHIVE_NESTING_DEPTH = 8
 MAX_ARCHIVE_SCAN_SECONDS = 180
 MAX_ARCHIVE_COMPRESSION_RATIO = 1000
+# Optional deep archive profile: broader bounds, no per-archive clock, and a
+# free-space reserve for temporary extraction. These remain finite safeguards.
+DEEP_ARCHIVE_MAX_MEMBERS = 100000
+DEEP_ARCHIVE_MAX_MEMBER_BYTES = 1024 * 1024 * 1024
+DEEP_ARCHIVE_MAX_EXPANDED_BYTES = 8 * 1024 * 1024 * 1024
+DEEP_ARCHIVE_MAX_NESTING_DEPTH = 32
+DEEP_ARCHIVE_MAX_COMPRESSION_RATIO = 5000
+DEEP_ARCHIVE_MIN_FREE_BYTES = 1024 * 1024 * 1024
 TAGS = ["XWorm", "MrBeast"]  # แท็กที่ดึงจาก MalwareBazaar / ThreatFox
 
 # โดเมนหลอกลวงที่รู้จัก (เพิ่มเองได้ด้วยการแก้ลิสต์นี้)
@@ -964,8 +972,8 @@ def analyze(path, con, logical_path=None):
     return severity, reasons, sha
 
 
-def scan_archive(path, con):
-    """Stream inspectable ZIP members with explicit time, depth, count and disk budgets."""
+def scan_archive(path, con, deep=False):
+    """Stream ZIP members using standard or extended deep-scan budgets."""
     findings = []
     archive_stack = []
     container = str(path)
@@ -974,6 +982,31 @@ def scan_archive(path, con):
     started_at = time.monotonic()
     limit_hit = False
     member_bytes = 0
+    member_limit = DEEP_ARCHIVE_MAX_MEMBERS if deep else MAX_ARCHIVE_MEMBERS
+    member_bytes_limit = DEEP_ARCHIVE_MAX_MEMBER_BYTES if deep else MAX_ARCHIVE_MEMBER_BYTES
+    expanded_bytes_limit = DEEP_ARCHIVE_MAX_EXPANDED_BYTES if deep else MAX_ARCHIVE_EXPANDED_BYTES
+    nesting_depth_limit = DEEP_ARCHIVE_MAX_NESTING_DEPTH if deep else MAX_ARCHIVE_NESTING_DEPTH
+    compression_ratio_limit = DEEP_ARCHIVE_MAX_COMPRESSION_RATIO if deep else MAX_ARCHIVE_COMPRESSION_RATIO
+    scan_seconds_limit = None if deep else MAX_ARCHIVE_SCAN_SECONDS
+
+    def scan_time_exceeded():
+        return scan_seconds_limit is not None and time.monotonic() - started_at >= scan_seconds_limit
+
+    def deep_disk_guard(label, next_chunk_bytes=0):
+        nonlocal limit_hit
+        if not deep:
+            return False
+        try:
+            free_bytes = shutil.disk_usage(tempfile.gettempdir()).free
+        except OSError as error:
+            scan_issue(f"ตรวจพื้นที่ว่างสำหรับสแกน archive ลึกไม่ได้ {label}: {error}")
+            limit_hit = True
+            return True
+        if free_bytes <= DEEP_ARCHIVE_MIN_FREE_BYTES + next_chunk_bytes:
+            scan_issue(f"หยุดสแกน archive ลึกเพื่อรักษาพื้นที่ว่างอย่างน้อย 1 GiB: {label}")
+            limit_hit = True
+            return True
+        return False
 
     def archive_entry_count(source):
         # Inspect the small end record before ZipFile builds its in-memory list.
@@ -985,26 +1018,32 @@ def scan_archive(path, con):
 
     def read_member(member, amount, label):
         nonlocal expanded_bytes, member_bytes, limit_hit
-        if time.monotonic() - started_at >= MAX_ARCHIVE_SCAN_SECONDS:
+        if scan_time_exceeded():
             scan_issue(f"หยุดตรวจ archive เมื่อเกินเวลาที่กำหนด: {label}")
             limit_hit = True
+            return None
+        if deep_disk_guard(label, amount):
+            scan_issue(f"หยุดสแกน archive ลึกเพื่อรักษาพื้นที่ว่างอย่างน้อย 1 GiB: {label}")
             return None
         chunk = member.read(amount)
         if not chunk:
             return b""
         member_bytes += len(chunk)
         expanded_bytes += len(chunk)
-        if member_bytes > MAX_ARCHIVE_MEMBER_BYTES:
+        if member_bytes > member_bytes_limit:
             scan_issue(f"ข้ามสมาชิก archive ที่เกินขนาดต่อไฟล์: {label}")
             limit_hit = True
             return None
-        if expanded_bytes > MAX_ARCHIVE_EXPANDED_BYTES:
+        if expanded_bytes > expanded_bytes_limit:
             scan_issue(f"หยุดตรวจ archive เมื่อข้อมูลคลายบีบอัดรวมเกินขีดจำกัด: {label}")
             limit_hit = True
             return None
-        if time.monotonic() - started_at >= MAX_ARCHIVE_SCAN_SECONDS:
+        if scan_time_exceeded():
             scan_issue(f"หยุดตรวจ archive เมื่อเกินเวลาที่กำหนด: {label}")
             limit_hit = True
+            return None
+        if deep_disk_guard(label):
+            scan_issue(f"หยุดสแกน archive ลึกเพื่อรักษาพื้นที่ว่างอย่างน้อย 1 GiB: {label}")
             return None
         return chunk
 
@@ -1013,7 +1052,7 @@ def scan_archive(path, con):
         SCAN_AUDIT.setdefault("archive", {"archives": 0, "members_seen": 0, "expanded_bytes": 0})["archives"] += 1
         try:
             entry_count = archive_entry_count(source)
-            if members_seen + entry_count > MAX_ARCHIVE_MEMBERS:
+            if members_seen + entry_count > member_limit:
                 scan_issue(f"ข้าม archive ที่จำนวนสมาชิกเกินขีดจำกัด: {label}")
                 if temporary_path:
                     remove_temporary(temporary_path, label)
@@ -1054,9 +1093,12 @@ def scan_archive(path, con):
         while archive_stack:
             if STOP["flag"]:
                 break
-            if time.monotonic() - started_at >= MAX_ARCHIVE_SCAN_SECONDS:
+            if scan_time_exceeded():
                 scan_issue(f"หยุดตรวจ archive เมื่อเกินเวลาที่กำหนด: {archive_stack[-1]['label']}")
                 limit_hit = True
+                break
+            if deep_disk_guard(archive_stack[-1]["label"]):
+                scan_issue(f"หยุดสแกน archive ลึกเพื่อรักษาพื้นที่ว่างอย่างน้อย 1 GiB: {archive_stack[-1]['label']}")
                 break
             frame = archive_stack[-1]
             try:
@@ -1072,7 +1114,7 @@ def scan_archive(path, con):
                 members_seen += 1
                 continue
             members_seen += 1
-            if members_seen > MAX_ARCHIVE_MEMBERS:
+            if members_seen > member_limit:
                 scan_issue(f"หยุดตรวจ archive เมื่อจำนวนสมาชิกเกินขีดจำกัด: {frame['label']}")
                 limit_hit = True
                 break
@@ -1080,11 +1122,15 @@ def scan_archive(path, con):
             if info.flag_bits & 0x1:
                 scan_issue(f"ข้ามไฟล์ใน archive ที่เข้ารหัสไว้: {target}")
                 continue
-            if info.file_size > MAX_ARCHIVE_MEMBER_BYTES:
+            if info.file_size > member_bytes_limit:
                 scan_issue(f"ข้ามสมาชิก archive ที่เกินขนาดต่อไฟล์: {target}")
                 continue
+            if info.file_size > expanded_bytes_limit - expanded_bytes:
+                scan_issue(f"หยุดตรวจ archive เมื่อข้อมูลคลายบีบอัดรวมเกินขีดจำกัด: {target}")
+                limit_hit = True
+                break
             if info.file_size > 1024 * 1024 and info.compress_size > 0 and (
-                info.file_size / info.compress_size > MAX_ARCHIVE_COMPRESSION_RATIO
+                info.file_size / info.compress_size > compression_ratio_limit
             ):
                 scan_issue(f"ข้ามสมาชิก archive ที่มีอัตราขยายสูงผิดปกติ: {target}")
                 continue
@@ -1134,7 +1180,7 @@ def scan_archive(path, con):
                             "risk_band": metadata.get("risk_band", "CLEAN / UNKNOWN"),
                         })
                 if is_archive or is_nested_zip:
-                    if len(archive_stack) >= MAX_ARCHIVE_NESTING_DEPTH:
+                    if len(archive_stack) >= nesting_depth_limit:
                         scan_issue(f"ข้าม archive ซ้อนที่เกินความลึกสูงสุด: {target}")
                     else:
                         push_archive(member_temp_path, target, member_temp_path)
@@ -1439,12 +1485,15 @@ def cmd_scan(args):
         print("[!] เครื่องมือนี้ออกแบบสำหรับ Windows - บางส่วนจะข้ามไป")
     files_only = bool(getattr(args, "files_only", False))
     clean = bool(args.clean)
+    deep_archives = bool(getattr(args, "deep_archives", False))
     if files_only and clean:
         raise SystemExit("โหมดสแกนไฟล์อัตโนมัติเป็นแบบดูอย่างเดียว; เลือกกักกันเองจากผลสแกน")
     if files_only and getattr(args, "full", False):
         raise SystemExit("เลือกได้เพียงโหมดสแกนไฟล์อัตโนมัติหรือสแกนทั้งไดรฟ์")
     if files_only and getattr(args, "paths", None):
         raise SystemExit("โหมดสแกนไฟล์อัตโนมัติใช้เฉพาะโฟลเดอร์ที่กำหนดไว้")
+    if deep_archives:
+        print("[!] โหมด archive ลึก: ใช้ขีดจำกัดที่ขยายเพิ่ม, รักษาพื้นที่ว่างอย่างน้อย 1 GiB; หยุดได้ทุกเมื่อ")
     SCAN_AUDIT.clear()
     SCAN_AUDIT.update(issues=0, details=[], files_analyzed=0, files_skipped=0,
                       archive={"archives": 0, "members_seen": 0, "expanded_bytes": 0},
@@ -1505,7 +1554,7 @@ def cmd_scan(args):
                     except OSError as error:
                         scan_issue(f"คำนวณ SHA-256 ของ archive ไม่สำเร็จ ({type(error).__name__})")
                         SCAN_AUDIT["files_skipped"] += 1
-                contained_findings = scan_archive(f, con)
+                contained_findings = scan_archive(f, con, deep=deep_archives)
                 for item in contained_findings:
                     item["container_sha256"] = sha
                 archive_findings.extend(contained_findings)
@@ -1582,6 +1631,7 @@ def cmd_scan(args):
         scan_id=scan_id, started_at=scan_started,
         time=dt.datetime.now().astimezone().isoformat(timespec="seconds"), files=count, clean=clean,
         scope="files" if files_only else "system",
+        deep_archives=deep_archives,
         findings=saved_findings, complete=SCAN_AUDIT["issues"] == 0, issues=SCAN_AUDIT["issues"],
         audit={"details": list(SCAN_AUDIT["details"]), "memory": dict(SCAN_AUDIT["memory"]),
                "files_analyzed": SCAN_AUDIT["files_analyzed"], "files_skipped": SCAN_AUDIT["files_skipped"],
@@ -1609,6 +1659,7 @@ def cmd_scan(args):
         hist.append({
             "scan_id": scan_id, "started_at": scan_started,
             "time": LAST_SCAN["time"], "files": count, "clean": clean, "scope": LAST_SCAN["scope"],
+            "deep_archives": deep_archives,
             "complete": LAST_SCAN["complete"], "issues": LAST_SCAN["issues"], "audit": LAST_SCAN["audit"],
             **totals, "findings_total": len(LAST_SCAN["findings"]),
             "findings": LAST_SCAN["findings"][:100],
@@ -1749,6 +1800,7 @@ def main():
     s.add_argument("--ask", action="store_true", help="ถามผู้ใช้ทีละรายการที่เป็น MEDIUM/LOW")
     s.add_argument("--full", action="store_true")
     s.add_argument("--files-only", action="store_true", help="สแกนไฟล์ในโฟลเดอร์ผู้ใช้ที่พบบ่อย โดยไม่ตรวจส่วนระบบ")
+    s.add_argument("--deep-archives", action="store_true", help="ตรวจ archive ด้วยขีดจำกัดที่ขยายเพิ่มและรักษาพื้นที่ว่าง 1 GiB")
     s.add_argument("--paths", nargs="*")
     s.set_defaults(fn=cmd_scan)
     sub.add_parser("quarantine").set_defaults(fn=cmd_quarantine)

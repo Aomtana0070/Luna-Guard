@@ -50,11 +50,11 @@ lg.run, lg.winreg = fake_run, FakeReg
 RUNKEY = ("HKCU", r"Software\Microsoft\Windows\CurrentVersion\Run")
 
 
-def scan(clean=False, paths=None, files_only=False):
+def scan(clean=False, paths=None, files_only=False, deep_archives=False):
     buf = io.StringIO()
     with mock.patch.object(lg, "scan_process_memory", return_value=[]), contextlib.redirect_stdout(buf):
         lg.cmd_scan(argparse.Namespace(
-            clean=clean, files_only=files_only, full=False,
+            clean=clean, files_only=files_only, full=False, deep_archives=deep_archives,
             paths=None if files_only else (paths or [str(TMP)]),
         ))
     return buf.getvalue(), lg.LAST_SCAN
@@ -181,6 +181,13 @@ class T(unittest.TestCase):
                     self.assertTrue(cmd_scan.call_args.args[0].files_only)
                     self.assertFalse(cmd_scan.call_args.args[0].clean)
 
+                status, response = post({"deep_archives": True})
+                self.assertEqual((status, response["ok"]), (200, True))
+                self.assertEqual(jobs[1][0], "สแกน archive ลึก")
+                with mock.patch.object(lg, "cmd_scan") as cmd_scan:
+                    jobs[1][1]()
+                    self.assertTrue(cmd_scan.call_args.args[0].deep_archives)
+
                 status, response = post({"files_only": True, "clean": True})
                 self.assertEqual(status, 400)
                 self.assertIn("read-only", response["error"])
@@ -188,7 +195,9 @@ class T(unittest.TestCase):
                 self.assertEqual(status, 400)
                 status, response = post({"files_only": True, "full": True})
                 self.assertEqual(status, 400)
-                self.assertEqual(start.call_count, 1)
+                status, response = post({"deep_archives": "true"})
+                self.assertEqual(status, 400)
+                self.assertEqual(start.call_count, 2)
         finally:
             server.shutdown()
             server.server_close()
@@ -500,7 +509,7 @@ class T(unittest.TestCase):
         self.assertEqual(finding["sev"], "high")
         self.assertGreaterEqual(finding["target"].count("nested.zip"), 4)
 
-    def test35_large_expanded_archive_member_is_streamed_and_cleaned_up(self):
+    def test35_expanded_archive_member_over_budget_is_rejected_without_temp_file(self):
         archive_path = TMP / "large-expanded.zip"
         zero_block = bytes(1024 * 1024)
         with zipfile.ZipFile(archive_path, "w", zipfile.ZIP_DEFLATED) as archive:
@@ -525,8 +534,7 @@ class T(unittest.TestCase):
             _, result = scan()
         self.assertFalse(result["complete"], "expanded data beyond the cap must mark the scan incomplete")
         self.assertGreater(result["issues"], 0)
-        self.assertTrue(created)
-        self.assertTrue(all(not temporary_file.exists() for temporary_file in created))
+        self.assertFalse(created, "members larger than the remaining expansion budget must not be extracted")
 
     def test36_archive_temp_storage_failure_marks_scan_incomplete(self):
         archive_path = TMP / "temp-storage-failure.zip"
@@ -537,6 +545,54 @@ class T(unittest.TestCase):
         self.assertFalse(result["complete"])
         self.assertGreater(result["issues"], 0)
         self.assertIn("disk full", output)
+
+    def test43_deep_archive_profile_finds_payload_beyond_standard_depth(self):
+        content = io.BytesIO()
+        with zipfile.ZipFile(content, "w", zipfile.ZIP_DEFLATED) as archive:
+            archive.writestr("payload.exe", XW)
+        for depth in range(10):
+            nested = io.BytesIO()
+            with zipfile.ZipFile(nested, "w", zipfile.ZIP_DEFLATED) as archive:
+                archive.writestr(f"layer-{depth}.zip", content.getvalue())
+            content = nested
+        archive_path = TMP / "deep-profile.zip"
+        archive_path.write_bytes(content.getvalue())
+
+        _, standard = scan()
+        self.assertFalse(standard["complete"])
+        self.assertFalse(any(item["kind"] == "Archive member" for item in standard["findings"]))
+
+        with mock.patch.object(lg, "MAX_ARCHIVE_SCAN_SECONDS", -1):
+            _, deep = scan(deep_archives=True)
+        self.assertTrue(deep["complete"], "deep archive mode must not use the standard timer")
+        self.assertTrue(deep["deep_archives"])
+        self.assertTrue(any(item["kind"] == "Archive member" for item in deep["findings"]))
+
+    def test44_deep_archive_low_disk_guard_reports_incomplete_and_cleans_temp(self):
+        archive_path = TMP / "deep-low-disk.zip"
+        with zipfile.ZipFile(archive_path, "w", zipfile.ZIP_DEFLATED) as archive:
+            archive.writestr("payload.exe", XW)
+        created = []
+        real_named_temp = lg.tempfile.NamedTemporaryFile
+
+        def tracked_temp(**kwargs):
+            kwargs["dir"] = TMP
+            result = real_named_temp(**kwargs)
+            created.append(Path(result.name))
+            return result
+
+        free_space = [2 * 1024**3, 2 * 1024**3, 2 * 1024**3, 0]
+        def disk_usage(*_args, **_kwargs):
+            return type("Usage", (), {"free": free_space.pop(0)})()
+
+        with mock.patch.object(lg.tempfile, "NamedTemporaryFile", side_effect=tracked_temp), \
+                mock.patch.object(lg.shutil, "disk_usage", side_effect=disk_usage):
+            output, result = scan(deep_archives=True)
+        self.assertFalse(result["complete"])
+        self.assertTrue(any("1 GiB" in detail for detail in result["audit"]["details"]))
+        self.assertIn("archive ลึก", output)
+        self.assertTrue(created)
+        self.assertTrue(all(not path.exists() for path in created))
 
     def test28_defender_status_and_scan_commands_are_validated(self):
         completed = __import__("subprocess").CompletedProcess(

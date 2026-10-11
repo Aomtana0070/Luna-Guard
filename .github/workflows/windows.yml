@@ -25,6 +25,8 @@ jobs:
         run: python -m pip install -r requirements-build.txt
       - name: Run tests
         run: python -m unittest -v test_luna test_security
+      - name: Run synthetic malware and archive budget benchmark
+        run: python benchmarks/run_benchmark.py --output benchmark-report.json
       - name: Build desktop executable
         run: pyinstaller --clean --onefile --noconsole --uac-admin --icon "logo/Luna_Guard.ico" --name LunaGuard --distpath dist/release --collect-all webview --add-data "dashboard.html;." --add-data "locales.json;." --add-data "logo/Luna_Guard.png;logo" --add-data "luna_rules.yar;." --add-data "rules;rules" --add-data "malware_knowledge.json;." luna_app.py
       - name: Record executable checksum and build provenance
@@ -34,4 +36,10 @@ jobs:
         with:
           name: LunaGuard-Windows
           path: dist/release/*
+          if-no-files-found: error
+      - name: Upload benchmark report
+        uses: actions/upload-artifact@v4
+        with:
+          name: LunaGuard-Benchmark
+          path: benchmark-report.json
           if-no-files-found: error
