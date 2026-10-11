@@ -42,7 +42,7 @@ Windows EXE files are unsigned because this project does not currently use a pai
 
 Before creating a new `v*` release tag, configure the GitHub environment named `production-release`, restrict it to `v*` tags, and require a reviewer. Add these environment secrets for Android signing: `ANDROID_KEYSTORE_BASE64`, `ANDROID_KEYSTORE_PASSWORD`, `ANDROID_KEY_ALIAS`, and `ANDROID_KEY_PASSWORD`. No Windows signing secrets are needed. Never commit signing files or paste private keys/passwords into issues or chat. If the protected environment or a required Android signing secret is missing, or APK signature verification fails, the release workflow stops without publishing assets.
 
-## Mobile app (Android and iOS) — In development (1.5.2+7)
+## Mobile app (Android and iOS) — In development (1.5.3+8)
 
 
 The Flutter source is in [mobile/](./mobile/). It scans only files the user selects, stores history and imported SHA-256 lists on-device, and does not upload file contents. The mobile scanner is a limited offline checker; it does not run the desktop YARA engine, inspect archive members or process memory, or scan other apps' private files.

@@ -22,6 +22,7 @@ API_REQUESTS_LOCK = threading.Lock()
 LOG_LOCK = threading.Lock()
 JOB_LOCK = threading.Lock()
 MAX_APP_LOG_LINES = 2000
+FINDING_PAGE_SIZE = 20
 
 
 def get_language():
@@ -280,7 +281,33 @@ def state():
         S["history_error"] = message
         hist = []
     hist = [item for item in hist if isinstance(item, dict)]
-    last = lg.LAST_SCAN or (hist[-1] if hist else {})
+    last_source = lg.LAST_SCAN or (hist[-1] if hist else {})
+    last = dict(last_source)
+    last_findings = last_source.get("findings", [])
+    last["findings_total"] = int(last_source.get("findings_total", len(last_findings)) or 0)
+    last["findings_available"] = len(last_findings)
+    for severity in ("high", "medium", "low"):
+        last[severity] = int(last_source.get(severity, sum(item.get("sev") == severity for item in last_findings)) or 0)
+    last["pending"] = int(last_source.get("pending", sum(item.get("kind") == "ไฟล์" for item in last_findings)) or 0)
+    # Detection records can contain verbose PE metadata and YARA explanations.
+    # Fetch them separately in small pages instead of serializing every hit on each status poll.
+    last["findings"] = []
+    recent_history = []
+    for entry in hist[-20:]:
+        summary = dict(entry)
+        items = summary.get("findings", [])
+        summary["findings_total"] = int(summary.get("findings_total", len(items)) or 0)
+        summary["findings"] = [
+            {key: str(item.get(key, ""))[:1000] if key in ("target", "why") else item.get(key)
+             for key in ("sev", "kind", "target", "why")}
+            for item in items[:10] if isinstance(item, dict)
+        ]
+        audit = summary.get("audit")
+        if isinstance(audit, dict):
+            audit = dict(audit)
+            audit["details"] = audit.get("details", [])[:20]
+            summary["audit"] = audit
+        recent_history.append(summary)
     now = dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds")
     ioc_states = {row[0]: row[1] for row in con.execute(
         "SELECT state,COUNT(DISTINCT kind||':'||value) FROM threat_iocs GROUP BY state")}
@@ -311,7 +338,7 @@ def state():
          "memory_scan": bool(lg.IS_WIN and lg.yara_rules()), "admin": is_admin(), "job": S["job"], "last_job": S["last_job"],
          "onboarding_complete": get_onboarding_complete(),
          "defender": defender_status(), "audit": luna_audit.read_recent(50),
-         "hist": hist[-20:], "last": last, "quar": [{"id": k, **v} for k, v in lg.load_index().items()], "self": S["self"], "prog": dict(lg.PROGRESS), "n": S["log_base"] + len(S["log"]), "language": get_language()}
+         "hist": recent_history, "last": last, "quar": [{"id": k, **v} for k, v in lg.load_index().items()], "self": S["self"], "prog": dict(lg.PROGRESS), "n": S["log_base"] + len(S["log"]), "language": get_language()}
     con.close(); return r
 
 
@@ -450,6 +477,24 @@ class H(BaseHTTPRequestHandler):
             except (OSError, RuntimeError, ValueError) as e:
                 log(f"[!] อ่านสถานะภายในไม่สำเร็จ: {e}")
                 return s.out(500, {"error": "could not read application state"})
+        if p == "/api/findings" and set(params) == {"offset"}:
+            try:
+                if len(params["offset"]) != 1: raise ValueError
+                offset = int(params["offset"][0])
+                if offset < 0 or offset % FINDING_PAGE_SIZE: raise ValueError
+            except (ValueError, IndexError):
+                return s.out(400, {"error": "invalid findings page"})
+            if lg.LAST_SCAN:
+                findings = lg.LAST_SCAN.get("findings", [])
+            else:
+                try:
+                    history = json.loads(lg.HISTORY.read_text(encoding="utf-8"))
+                    findings = history[-1].get("findings", []) if history and isinstance(history[-1], dict) else []
+                except (OSError, ValueError, TypeError):
+                    findings = []
+            total = len(findings)
+            return s.out(200, {"offset": offset, "total": total,
+                               "findings": findings[offset:offset + FINDING_PAGE_SIZE]})
         if p == "/api/log" and set(params) <= {"since"}:
             try:
                 if len(params.get("since", ["0"])) != 1: raise ValueError

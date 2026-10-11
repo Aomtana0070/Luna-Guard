@@ -321,8 +321,12 @@ class T(unittest.TestCase):
         self.assertTrue(os.path.samefile(saved["findings"][0]["target"], str(f)))
         self.assertEqual(saved["medium"], 1)
         lg.LAST_SCAN.clear()
-        self.assertEqual(dashboard.state()["last"]["time"], saved["time"])
-        self.assertEqual(dashboard.state()["last"]["findings"], saved["findings"])
+        state = dashboard.state()["last"]
+        self.assertEqual(state["time"], saved["time"])
+        self.assertEqual(state["findings"], [])
+        self.assertEqual(state["findings_available"], 1)
+        self.assertEqual(state["findings_total"], 1)
+        self.assertEqual(state["medium"], 1)
 
     def test17_threatfox_dict_data_is_normalized(self):
         def fake_http(url, data=None, headers=None, timeout=0):

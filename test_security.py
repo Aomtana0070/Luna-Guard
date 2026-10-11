@@ -294,6 +294,24 @@ class DashboardSecurityTests(unittest.TestCase):
         status, _, _ = self.request("/api/state", headers={})
         self.assertEqual(status, 403)
 
+    def test_findings_are_returned_in_small_pages(self):
+        findings = [{"sev": "low", "kind": "ไฟล์", "target": f"sample-{i}.exe", "why": "test"}
+                    for i in range(45)]
+        with mock.patch.object(lg, "LAST_SCAN", {"findings": findings}):
+            headers = {"X-Luna-Token": dashboard.TOKEN}
+            status, _, body = self.request("/api/findings?offset=0", headers=headers)
+            self.assertEqual(status, 200)
+            first = json.loads(body)
+            self.assertEqual(first["total"], 45)
+            self.assertEqual(len(first["findings"]), dashboard.FINDING_PAGE_SIZE)
+            status, _, body = self.request("/api/findings?offset=20", headers=headers)
+            self.assertEqual(status, 200)
+            second = json.loads(body)
+            self.assertEqual(len(second["findings"]), dashboard.FINDING_PAGE_SIZE)
+            self.assertEqual(second["findings"][0]["target"], "sample-20.exe")
+            status, _, _ = self.request("/api/findings?offset=3", headers=headers)
+            self.assertEqual(status, 400)
+
     def test_cross_origin_is_rejected(self):
         status, _, _ = self.request("/api/state", headers={
             "X-Luna-Token": dashboard.TOKEN,
