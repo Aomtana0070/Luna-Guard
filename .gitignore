@@ -11,6 +11,17 @@ config.json
 threats.db
 history.json
 quarantine/
+
+# Local secrets and signing material
+.env
+.env.*
+!.env.example
+*.pfx
+*.p12
+*.jks
+*.keystore
+key.properties
+signing.properties
 rules/*
 !rules/README.md
 !rules/core/
@@ -44,3 +55,6 @@ rules/community/*
 .pytest_cache/
 .vscode/
 *.log
+
+# Local Android signing keystore
+private-signing/

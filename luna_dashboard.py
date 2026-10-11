@@ -363,7 +363,9 @@ class H(BaseHTTPRequestHandler):
         s.send_header("X-Content-Type-Options", "nosniff")
         s.send_header("Referrer-Policy", "no-referrer")
         s.send_header("X-Frame-Options", "DENY")
-        s.send_header("Content-Security-Policy", "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'")
+        nonce = getattr(s, "response_nonce", "")
+        script_policy = f"'self' 'nonce-{nonce}'" if nonce else "'self'"
+        s.send_header("Content-Security-Policy", f"default-src 'self'; script-src {script_policy}; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'")
         s.end_headers()
         try:
             s.wfile.write(b)
@@ -430,6 +432,8 @@ class H(BaseHTTPRequestHandler):
             try:
                 page = (BASE / "dashboard.html").read_text(encoding="utf-8")
                 page = page.replace("__LUNA_TOKEN__", json.dumps(TOKEN))
+                s.response_nonce = secrets.token_urlsafe(18)
+                page = page.replace("__LUNA_NONCE__", s.response_nonce)
                 return s.out(200, page.encode("utf-8"), "text/html")
             except OSError:
                 return s.out(500, {"error": "dashboard unavailable"})
@@ -605,10 +609,51 @@ class H(BaseHTTPRequestHandler):
     def do_TRACE(s): return s._reject_method()
 
 
+class BoundedThreadingHTTPServer(ThreadingHTTPServer):
+    """Keep a local client from creating an unbounded number of request threads."""
+    daemon_threads = True
+    request_queue_size = 32
+    max_workers = 32
+
+    def __init__(self, *args, **kwargs):
+        self._request_slots = threading.BoundedSemaphore(self.max_workers)
+        super().__init__(*args, **kwargs)
+
+    def process_request(self, request, client_address):
+        if not self._request_slots.acquire(blocking=False):
+            try:
+                request.settimeout(0.1)
+                incoming = bytearray()
+                while len(incoming) < 16 * 1024 and b"\r\n\r\n" not in incoming:
+                    chunk = request.recv(min(2048, 16 * 1024 - len(incoming)))
+                    if not chunk:
+                        break
+                    incoming.extend(chunk)
+                request.sendall(
+                    b"HTTP/1.1 503 Service Unavailable\r\n"
+                    b"Connection: close\r\nContent-Length: 0\r\n\r\n"
+                )
+            except OSError:
+                pass
+            self.shutdown_request(request)
+            return
+        try:
+            super().process_request(request, client_address)
+        except BaseException:
+            self._request_slots.release()
+            raise
+
+    def process_request_thread(self, request, client_address):
+        try:
+            super().process_request_thread(request, client_address)
+        finally:
+            self._request_slots.release()
+
+
 if __name__ == "__main__":
     ap = argparse.ArgumentParser(description="Luna Guard local dashboard API (desktop UI is launched with luna_app.py)")
     ap.add_argument("--port", type=int, default=0); ap.add_argument("--open-browser", action="store_true")
-    a = ap.parse_args(); check_quarantine_recovery(); srv = ThreadingHTTPServer(("127.0.0.1", a.port), H)
+    a = ap.parse_args(); check_quarantine_recovery(); srv = BoundedThreadingHTTPServer(("127.0.0.1", a.port), H)
     url = f"http://127.0.0.1:{srv.server_address[1]}/"; print("Luna Guard Dashboard:", url)
     if a.open_browser: webbrowser.open(url)
     srv.serve_forever()
