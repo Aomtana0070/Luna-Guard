@@ -1,7 +1,7 @@
 name: luna_guard_mobile
 description: On-device file checker for Luna Guard on Android and iOS.
 publish_to: none
-version: 1.5.3+8
+version: 1.5.4+9
 
 environment:
   sdk: ^3.11.0

@@ -58,3 +58,4 @@ rules/community/*
 
 # Local Android signing keystore
 private-signing/
+/scripts/copy_android_signing_secrets.ps1
