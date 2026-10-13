@@ -232,6 +232,8 @@ def restore_file(item_id: str, quarantine_dir: Path, index_path: Path,
         state = entry.get("status", "committed")
         if state != "committed":
             raise RuntimeError(f"รายการ quarantine ต้องตรวจ recovery ก่อน (สถานะ {state})")
+        if entry.get("quarantine_name", f"{item_id}.quar") != f"{item_id}.quar":
+            raise RuntimeError("quarantine metadata ไม่ตรงกับชื่อไฟล์; ระงับ Restore")
         expected = entry["sha256"].lower()
         quarantined = _entry_path(quarantine_dir, item_id)
         _regular_file(quarantined, "quarantine file")

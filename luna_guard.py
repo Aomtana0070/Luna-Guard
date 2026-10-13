@@ -283,11 +283,11 @@ def record_ioc(con, value, kind, family, source, *, last_seen=None, expires_at=N
     con.execute("INSERT OR REPLACE INTO iocs(value,kind,family,source) VALUES(?,?,?,?)",
                 (value, kind, family, source))
     now = dt.datetime.now(dt.timezone.utc)
-    seen = last_seen or now.isoformat(timespec="seconds")
+    seen = _feed_time(last_seen, now.isoformat(timespec="seconds"))
     old = con.execute("SELECT first_seen FROM ioc_lifecycle WHERE value=?", (value,)).fetchone()
     first_seen = old[0] if old else seen
-    expiry = expires_at
-    state = "expired" if expiry and expiry <= now.isoformat(timespec="seconds") else "active"
+    expiry = _feed_time(expires_at) if expires_at else None
+    state = _ioc_lifecycle_state(expiry, now)
     con.execute("""INSERT OR REPLACE INTO ioc_lifecycle
         (value,state,first_seen,last_seen,expires_at,confidence,reference)
         VALUES(?,?,?,?,?,?,?)""",
@@ -300,9 +300,32 @@ def record_ioc(con, value, kind, family, source, *, last_seen=None, expires_at=N
     return not existed
 
 
+def _ioc_lifecycle_state(expires_at, now=None):
+    """Treat an IOC as stale for 30 days after its feed expiry, then expired."""
+    if not expires_at:
+        return "active"
+    now = now or dt.datetime.now(dt.timezone.utc)
+    try:
+        expiry = dt.datetime.fromisoformat(expires_at)
+    except (TypeError, ValueError):
+        return "expired"
+    if expiry.tzinfo is None:
+        expiry = expiry.replace(tzinfo=dt.timezone.utc)
+    if expiry > now:
+        return "active"
+    return "stale" if expiry > now - dt.timedelta(days=30) else "expired"
+
+
 def ioc_is_active(con, value, kind):
     now = dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds")
-    con.execute("UPDATE ioc_lifecycle SET state='expired' WHERE value=? AND state='active' AND expires_at IS NOT NULL AND expires_at<=?", (value, now))
+    lifecycle = con.execute("SELECT expires_at FROM ioc_lifecycle WHERE value=?", (value,)).fetchone()
+    if lifecycle:
+        con.execute("UPDATE ioc_lifecycle SET state=? WHERE value=?",
+                    (_ioc_lifecycle_state(lifecycle[0]), value))
+    records = con.execute("SELECT kind,source,expires_at FROM threat_iocs WHERE value=?", (value,)).fetchall()
+    for record_kind, source, expires_at in records:
+        con.execute("UPDATE threat_iocs SET state=? WHERE kind=? AND value=? AND source=?",
+                    (_ioc_lifecycle_state(expires_at), record_kind, value, source))
     return con.execute("""SELECT 1 FROM iocs i JOIN ioc_lifecycle l ON l.value=i.value
         WHERE i.value=? AND i.kind=? AND l.state='active'
         AND (l.expires_at IS NULL OR l.expires_at>?)""", (value, kind, now)).fetchone() is not None
@@ -976,10 +999,7 @@ def analyze_detailed(path, con, logical_path=None):
     if reputation:
         metadata["hash_reputation"] = reputation
         metadata["family_intel"] = malware_family_info(reputation["family"])
-        metadata["risk_score"] = 100
-        metadata["risk_band"] = "CRITICAL"
-        metadata["score_type"] = "risk score; not probability"
-        return "high", [f"{reputation['algorithm'].upper()} reputation: {reputation['threat_name']} ({reputation['source']})"], sha, metadata
+        metadata["reputation_reason"] = f"{reputation['algorithm'].upper()} reputation: {reputation['threat_name']} ({reputation['source']})"
     if con.execute("SELECT 1 FROM allow WHERE sha256=?", (sha,)).fetchone():
         return None, [], sha, metadata
     is_pe = prefix == b"MZ"
@@ -1019,23 +1039,57 @@ def analyze_detailed(path, con, logical_path=None):
         family = next((m.get("family") for m in matches if m.get("family") not in (None, "", "unknown")), None)
         if family:
             metadata["family_intel"] = malware_family_info(family)
+    # Correlate independent detection evidence and retain an explanation for the UI.
     score = 0
+    risk_factors = []
+    if reputation:
+        score += 100
+        risk_factors.append({"key": "known_hash", "points": 100, "source": reputation["source"],
+                             "detail": metadata["reputation_reason"]})
     if matches:
-        score = max((80 if m.get("severity") == "high" else
-                     50 if m.get("severity") == "medium" else 25)
-                    for m in matches)
+        strong_matches = [m for m in matches if str(m.get("severity", "")).lower() == "high"]
+        if strong_matches:
+            score += 80
+            risk_factors.append({"key": "strong_yara", "points": 80,
+                                 "detail": ", ".join(str(m.get("threat_name") or m.get("rule")) for m in strong_matches)})
+        else:
+            yara_points = max(50 if str(m.get("severity", "")).lower() == "medium" else 25 for m in matches)
+            score += yara_points
+            risk_factors.append({"key": "yara_match", "points": yara_points,
+                                 "detail": ", ".join(str(m.get("threat_name") or m.get("rule")) for m in matches)})
     elif severity == "high":
-        score = 60 if strong_xworm else 70
+        points = 60 if strong_xworm else 70
+        score += points
+        risk_factors.append({"key": "heuristic", "points": points, "detail": "; ".join(reasons)})
     elif severity == "medium":
-        score = 30
+        score += 30
+        risk_factors.append({"key": "heuristic", "points": 30, "detail": "; ".join(reasons)})
     elif severity == "low":
-        score = 20
+        score += 20
+        risk_factors.append({"key": "heuristic", "points": 20, "detail": "; ".join(reasons)})
     if is_pe and metadata.get("signature", "").startswith("unsigned"):
         score += 15
-    if not severity and size > 0:
+        risk_factors.append({"key": "unsigned", "points": 15})
+    if is_pe and (metadata.get("entropy", 0) >= 7.2 or metadata.get("pe_analysis", "").startswith("unavailable")):
+        score += 30
+        risk_factors.append({"key": "suspicious_metadata", "points": 30,
+                             "detail": "high entropy" if metadata.get("entropy", 0) >= 7.2 else "PE metadata unavailable"})
+    if not severity and not reputation and size > 0:
         score += 5
     score = min(100, score)
+    if reputation and not severity:
+        severity = "high"
+        reasons = [metadata["reputation_reason"]]
+    elif score >= 70 and severity not in ("high", "critical"):
+        severity = "high"
+        reasons = list(reasons) + [f"Correlated risk score {score}/100: " + ", ".join(
+            f"{factor['key']} +{factor['points']}" for factor in risk_factors)]
+    elif score >= 40 and severity is None:
+        severity = "medium"
+        reasons = [f"Correlated risk score {score}/100: " + ", ".join(
+            f"{factor['key']} +{factor['points']}" for factor in risk_factors)]
     metadata["risk_score"] = score
+    metadata["risk_factors"] = risk_factors
     metadata["risk_band"] = "CRITICAL" if score >= 90 else "HIGH" if score >= 70 else "MEDIUM" if score >= 40 else "LOW" if score else "CLEAN / UNKNOWN"
     metadata["score_type"] = "risk score; not probability"
     return severity, reasons, sha, metadata

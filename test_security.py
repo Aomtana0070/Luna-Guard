@@ -1,5 +1,6 @@
 """Security regressions for quarantine integrity and the loopback API."""
 import hashlib
+import datetime as dt
 import json
 import subprocess
 import sys
@@ -54,6 +55,15 @@ class QuarantineTests(unittest.TestCase):
     def test_modified_quarantine_is_not_restored(self):
         item_id = self.quarantine()
         (self.qdir / f"{item_id}.quar").write_bytes(b"tampered")
+        with self.assertRaises(RuntimeError):
+            quarantine.restore_file(item_id, self.qdir, self.index)
+        self.assertFalse(self.source.exists())
+
+    def test_tampered_quarantine_metadata_is_not_restored(self):
+        item_id = self.quarantine()
+        index = quarantine.load_index(self.index)
+        index[item_id]["quarantine_name"] = "different-file.quar"
+        quarantine._atomic_write_index(self.index, index)
         with self.assertRaises(RuntimeError):
             quarantine.restore_file(item_id, self.qdir, self.index)
         self.assertFalse(self.source.exists())
@@ -140,12 +150,16 @@ class ThreatLifecycleTests(unittest.TestCase):
                 self.assertEqual(con.execute("SELECT state FROM ioc_lifecycle WHERE value='expired.example'").fetchone()[0], "expired")
                 lg.record_ioc(con, "fresh.example", "domain", "test", "ThreatFox", expires_at="2999-01-01T00:00:00+00:00")
                 self.assertTrue(lg.ioc_is_active(con, "fresh.example", "domain"))
+                lg.record_ioc(con, "stale.example", "domain", "test", "ThreatFox", expires_at=(dt.datetime.now(dt.timezone.utc)-dt.timedelta(days=2)).isoformat())
+                self.assertFalse(lg.ioc_is_active(con, "stale.example", "domain"))
+                self.assertEqual(con.execute("SELECT state FROM ioc_lifecycle WHERE value='stale.example'").fetchone()[0], "stale")
+                self.assertEqual(con.execute("SELECT state FROM threat_iocs WHERE value='stale.example'").fetchone()[0], "stale")
                 con.close()
                 con = lg.db()
-                lg.record_ioc(con, "stale.example", "domain", "test", "ThreatFox", expires_at="2000-01-01T00:00:00+00:00")
+                lg.record_ioc(con, "old.example", "domain", "test", "ThreatFox", expires_at="2000-01-01T00:00:00+00:00")
                 con.commit()
-                self.assertFalse(lg.ioc_is_active(con, "stale.example", "domain"))
-                self.assertEqual(con.execute("SELECT state FROM ioc_lifecycle WHERE value='stale.example'").fetchone()[0], "expired")
+                self.assertFalse(lg.ioc_is_active(con, "old.example", "domain"))
+                self.assertEqual(con.execute("SELECT state FROM ioc_lifecycle WHERE value='old.example'").fetchone()[0], "expired")
                 con.close()
             finally:
                 lg.APP_DIR, lg.DB_PATH = old_app_dir, old_db_path
@@ -210,6 +224,18 @@ class ScanCompletenessTests(unittest.TestCase):
 
 
 class BuildProvenanceTests(unittest.TestCase):
+    def test_build_uses_a_fully_pinned_build_requirements_file(self):
+        root = Path(__file__).resolve().parent
+        requirements = (root / "requirements-build.txt").read_text(encoding="utf-8").splitlines()
+        packages = [line.strip() for line in requirements if line.strip() and not line.lstrip().startswith("#")
+                    and not line.strip().startswith("-r ")]
+        runtime = (root / "requirements.txt").read_text(encoding="utf-8").splitlines()
+        packages.extend(line.strip() for line in runtime if line.strip() and not line.lstrip().startswith("#"))
+        self.assertTrue(packages)
+        self.assertTrue(all("==" in package for package in packages))
+        self.assertIn("python -m pip install -r requirements-build.txt",
+                      (root / "build.bat").read_text(encoding="utf-8"))
+
     def test_build_manifest_has_verified_sha_and_explicit_production_signing_status(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -312,12 +338,44 @@ class DashboardSecurityTests(unittest.TestCase):
             status, _, _ = self.request("/api/findings?offset=3", headers=headers)
             self.assertEqual(status, 400)
 
+    def test_findings_can_be_filtered_by_type_and_severity_before_paging(self):
+        findings = [
+            {"sev": "high", "kind": "ไฟล์", "target": "bad.exe"},
+            {"sev": "low", "kind": "ไฟล์", "target": "review.exe"},
+            {"sev": "high", "kind": "Archive member", "target": "bundle.zip!bad.exe"},
+            {"sev": "high", "kind": "หน่วยความจำ", "target": "process 4"},
+        ]
+        with mock.patch.object(lg, "LAST_SCAN", {"findings": findings}):
+            status, _, body = self.request("/api/findings?offset=0&kind=file&severity=high",
+                                           headers={"X-Luna-Token": dashboard.TOKEN})
+            self.assertEqual(status, 200)
+            result = json.loads(body)
+            self.assertEqual(result["total"], 1)
+            self.assertEqual(result["findings"][0]["target"], "bad.exe")
+            status, _, _ = self.request("/api/findings?offset=0&kind=unknown",
+                                         headers={"X-Luna-Token": dashboard.TOKEN})
+            self.assertEqual(status, 400)
+
     def test_cross_origin_is_rejected(self):
         status, _, _ = self.request("/api/state", headers={
             "X-Luna-Token": dashboard.TOKEN,
             "Origin": "http://attacker.invalid",
         })
         self.assertEqual(status, 403)
+
+    def test_wrong_host_header_is_rejected(self):
+        status, _, _ = self.request("/api/state", headers={
+            "X-Luna-Token": dashboard.TOKEN,
+            "Host": "attacker.invalid",
+        })
+        self.assertEqual(status, 403)
+
+    def test_unknown_api_endpoint_is_not_found(self):
+        status, _, body = self.request("/api/not-a-real-endpoint", headers={
+            "X-Luna-Token": dashboard.TOKEN,
+        })
+        self.assertEqual(status, 404)
+        self.assertIn(b"not found", body)
 
     def test_dashboard_has_request_scoped_nonce_and_no_inline_handlers(self):
         status, headers, body = self.request("/")

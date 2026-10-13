@@ -477,11 +477,15 @@ class H(BaseHTTPRequestHandler):
             except (OSError, RuntimeError, ValueError) as e:
                 log(f"[!] อ่านสถานะภายในไม่สำเร็จ: {e}")
                 return s.out(500, {"error": "could not read application state"})
-        if p == "/api/findings" and set(params) == {"offset"}:
+        if p == "/api/findings" and "offset" in params and set(params) <= {"offset", "kind", "severity"}:
             try:
                 if len(params["offset"]) != 1: raise ValueError
                 offset = int(params["offset"][0])
                 if offset < 0 or offset % FINDING_PAGE_SIZE: raise ValueError
+                kind_filter = params.get("kind", ["all"])
+                severity_filter = params.get("severity", ["all"])
+                if len(kind_filter) != 1 or kind_filter[0] not in {"all", "file", "archive", "memory"}: raise ValueError
+                if len(severity_filter) != 1 or severity_filter[0] not in {"all", "high", "medium", "low"}: raise ValueError
             except (ValueError, IndexError):
                 return s.out(400, {"error": "invalid findings page"})
             if lg.LAST_SCAN:
@@ -492,6 +496,11 @@ class H(BaseHTTPRequestHandler):
                     findings = history[-1].get("findings", []) if history and isinstance(history[-1], dict) else []
                 except (OSError, ValueError, TypeError):
                     findings = []
+            if kind_filter[0] != "all":
+                kind_names = {"file": "ไฟล์", "archive": "Archive member", "memory": "หน่วยความจำ"}
+                findings = [item for item in findings if item.get("kind") == kind_names[kind_filter[0]]]
+            if severity_filter[0] != "all":
+                findings = [item for item in findings if str(item.get("sev", "")).lower() == severity_filter[0]]
             total = len(findings)
             return s.out(200, {"offset": offset, "total": total,
                                "findings": findings[offset:offset + FINDING_PAGE_SIZE]})
