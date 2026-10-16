@@ -1,6 +1,6 @@
 """36 test cases ของ Luna Guard  (รัน: python -m unittest -v test_luna)
 ส่วนที่เป็นคำสั่ง Windows (netstat/schtasks/ipconfig/registry) จำลองผลลัพธ์ด้วย mock - ไฟล์/แฮช/YARA/กักกัน/ฐานข้อมูลทดสอบจริง"""
-import argparse, contextlib, hashlib, io, json, os, struct, sys, tempfile, threading, unittest, zipfile
+import argparse, contextlib, hashlib, io, json, os, shutil, struct, sys, tempfile, threading, unittest, zipfile
 import urllib.parse
 from pathlib import Path
 from unittest import mock
@@ -65,7 +65,8 @@ def sev(res, kind): return [f["sev"] for f in res["findings"] if f["kind"] == ki
 
 class T(unittest.TestCase):
     def setUp(self):
-        for f in TMP.glob("*"): f.unlink()
+        for f in TMP.iterdir():
+            shutil.rmtree(f) if f.is_dir() and not f.is_symlink() else f.unlink()
         (Path(os.environ["APPDATA"]) / r"Microsoft\Windows\PowerShell\PSReadLine\ConsoleHost_history.txt").unlink(missing_ok=True)
         case_dir = ROOT / self._testMethodName; case_dir.mkdir(exist_ok=True)
         lg.APP_DIR = case_dir; lg.DB_PATH = case_dir / "threats.db"
@@ -83,6 +84,22 @@ class T(unittest.TestCase):
         con.execute("INSERT OR REPLACE INTO hashes VALUES(?,?,?)", (hashlib.sha256(f.read_bytes()).hexdigest(), "XWorm", "test"))
         con.commit(); con.close()
         _, r = scan(); self.assertEqual(sev(r, "ไฟล์"), ["high"])
+
+    def test51_correlated_detection_explains_combined_high_risk_score(self):
+        path = TMP / "correlated.exe"
+        path.write_bytes(b"MZ" + b"correlation sample " * 40)
+        con = lg.db()
+        digest = hashlib.sha256(path.read_bytes()).hexdigest()
+        lg.record_malware_hash(con, sha256=digest, family="test-family", threat_name="known sample", source="test-feed")
+        match = {"rule": "SyntheticStrong", "threat_name": "synthetic threat", "severity": "high", "family": "test-family"}
+        with mock.patch.object(lg, "yara_scan_file", return_value=[match]):
+            severity, reasons, _, analysis = lg.analyze_detailed(str(path), con)
+        con.close()
+        self.assertEqual(severity, "high")
+        self.assertEqual(analysis["risk_score"], 100)
+        self.assertEqual({factor["key"] for factor in analysis["risk_factors"]},
+                         {"known_hash", "strong_yara", "suspicious_metadata"})
+        self.assertTrue(reasons)
 
     def test02_yara_xworm_sample(self):
         (TMP / "b.exe").write_bytes(XW); out, r = scan()
@@ -539,6 +556,56 @@ class T(unittest.TestCase):
         self.assertFalse(result["complete"], "expanded data beyond the cap must mark the scan incomplete")
         self.assertGreater(result["issues"], 0)
         self.assertFalse(created, "members larger than the remaining expansion budget must not be extracted")
+
+    def test46_single_archive_member_over_limit_is_skipped(self):
+        archive_path = TMP / "oversized-member.zip"
+        with zipfile.ZipFile(archive_path, "w", zipfile.ZIP_STORED) as archive:
+            archive.writestr("large.txt", b"0123456789")
+        with mock.patch.object(lg, "MAX_ARCHIVE_MEMBER_BYTES", 4):
+            _, result = scan()
+        self.assertFalse(result["complete"])
+        self.assertGreater(result["issues"], 0)
+
+    def test47_archive_entry_limit_is_checked_before_listing_members(self):
+        archive_path = TMP / "too-many-entries.zip"
+        with zipfile.ZipFile(archive_path, "w") as archive:
+            archive.writestr("one.txt", b"1")
+            archive.writestr("two.txt", b"2")
+        with mock.patch.object(lg, "MAX_ARCHIVE_MEMBERS", 1):
+            _, result = scan()
+        self.assertFalse(result["complete"])
+        self.assertGreater(result["issues"], 0)
+
+    def test48_corrupt_archive_marks_scan_incomplete(self):
+        (TMP / "corrupt.zip").write_bytes(b"not a zip archive")
+        _, result = scan()
+        self.assertFalse(result["complete"])
+        self.assertGreater(result["issues"], 0)
+
+    def test49_encrypted_archive_member_is_skipped_safely(self):
+        archive_path = TMP / "encrypted.zip"
+        with zipfile.ZipFile(archive_path, "w") as archive:
+            archive.writestr("secret.txt", b"secret payload")
+        raw = bytearray(archive_path.read_bytes())
+        local = raw.find(b"PK\x03\x04")
+        central = raw.find(b"PK\x01\x02")
+        self.assertGreaterEqual(local, 0)
+        self.assertGreaterEqual(central, 0)
+        raw[local + 6] |= 1
+        raw[central + 8] |= 1
+        archive_path.write_bytes(raw)
+        _, result = scan()
+        self.assertFalse(result["complete"])
+        self.assertGreater(result["issues"], 0)
+
+    def test50_archive_timeout_marks_scan_incomplete(self):
+        archive_path = TMP / "timeout.zip"
+        with zipfile.ZipFile(archive_path, "w") as archive:
+            archive.writestr("large.txt", b"payload")
+        with mock.patch.object(lg, "MAX_ARCHIVE_SCAN_SECONDS", -1):
+            _, result = scan()
+        self.assertFalse(result["complete"])
+        self.assertGreater(result["issues"], 0)
 
     def test36_archive_temp_storage_failure_marks_scan_incomplete(self):
         archive_path = TMP / "temp-storage-failure.zip"

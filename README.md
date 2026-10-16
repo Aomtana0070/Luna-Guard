@@ -17,7 +17,7 @@ Luna Guard is a Windows desktop helper for scanning and quarantining suspicious 
 - Microsoft Defender status reporting and buttons to request Defender quick or full scans on Windows.
 - Optional YARA scanning with the bundled Luna Guard rules and `yara-python`.
 - Thai, English, and Simplified Chinese interface and in-app guide covering archive inspection and Microsoft Defender.
-- Threat-data updates add MalwareBazaar recent detections to the local file-hash database, plus ThreatFox and URLhaus indicators (abuse.ch). The local database retains SHA-256/SHA-1/MD5, source provenance and IOC active/stale/expired state. Hashes are matched before YARA/PE analysis; findings include a heuristic risk score, not a probability.
+- Threat-data updates add MalwareBazaar recent detections to the local file-hash database, plus ThreatFox and URLhaus indicators (abuse.ch). The local database retains hash/IOC source, confidence, first/last seen and IOC expiry/lifecycle metadata (`ACTIVE` → `STALE` for up to 30 days after expiry → `EXPIRED`). Findings correlate hash reputation, YARA, heuristic, signature and suspicious metadata signals into a capped risk score with per-signal explanations; the score is not a probability. Feed updates do not upload scanned files or scan history.
 - YARA rules load recursively from `rules/` and the local user-rules directory. PE analysis reports architecture, timestamp, signature presence, section entropy, imports and available version strings; signature authenticity is not validated.
 
 ## Run from source
@@ -44,7 +44,7 @@ Windows EXE files are unsigned because this project does not currently use a pai
 
 Before creating a new `v*` release tag, configure the GitHub environment named `production-release`, restrict it to `v*` tags, and require a reviewer. Add these environment secrets for Android signing: `ANDROID_KEYSTORE_BASE64`, `ANDROID_KEYSTORE_PASSWORD`, `ANDROID_KEY_ALIAS`, and `ANDROID_KEY_PASSWORD`. No Windows signing secrets are needed. Never commit signing files or paste private keys/passwords into issues or chat. If the protected environment or a required Android signing secret is missing, or APK signature verification fails, the release workflow stops without publishing assets.
 
-## Mobile app (Android and iOS) — In development (1.5.3+8)
+## Mobile app (Android and iOS) — 1.6.0+10
 
 
 The Flutter source is in [mobile/](./mobile/). It scans only files the user selects, stores history and imported SHA-256 lists on-device, and does not upload file contents. The mobile scanner is a limited offline checker; it does not run the desktop YARA engine, inspect archive members or process memory, or scan other apps' private files.
