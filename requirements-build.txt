@@ -8,7 +8,7 @@ clr_loader==0.3.1
 packaging==26.3
 pefile==2024.8.26
 proxy_tools==0.1.0
-pycparser==3.1
+pycparser==3.11
 pyinstaller==6.22.3
 pyinstaller-hooks-contrib==2026.8
 pythonnet==3.2.1
