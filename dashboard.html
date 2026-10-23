@@ -34,6 +34,27 @@ dialog.onboarding{max-width:min(560px,calc(100% - 32px));width:560px;border:1px 
 @keyframes m{0%{margin-left:-40%}100%{margin-left:100%}}@media(max-width:900px){.stats{grid-template-columns:repeat(2,minmax(0,1fr))}.hero,.guide-grid{grid-template-columns:1fr 1fr}.row2{grid-template-columns:1fr}main{padding:18px}}
 @media(max-width:620px){header{padding:10px 12px;gap:9px;flex-wrap:wrap}.brand-logo{width:42px;height:42px}header>div{flex:1}nav{order:5;width:100%;overflow-x:auto;margin:0;justify-content:flex-start}nav button{white-space:nowrap;padding:8px 12px}#language{max-width:120px}main{padding:12px;gap:12px}.tab.on{gap:12px}.card{padding:15px;border-radius:15px}.stats,.hero,.guide-grid,.settings-grid{grid-template-columns:1fr}.hero svg{width:112px!important;margin:auto}.big{font-size:26px}.finding-cards{display:grid}.detection-wrap{display:none}.settings-card{width:100%}.history-table{min-width:680px}}
 .feedback-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:16px}.feedback-card{min-height:230px;display:flex;flex-direction:column;align-items:flex-start;justify-content:space-between}.feedback-icon{width:48px;height:48px;display:grid;place-items:center;border:1px solid #22d3a844;border-radius:14px;background:#22d3a814;color:var(--ac);font-size:24px}.feedback-card h2{margin:14px 0 6px;font-size:20px}.feedback-card p{margin:0;color:var(--mu)}.feedback-card .btns{margin-top:18px}.feedback-link{display:inline-flex;align-items:center;justify-content:center;gap:12px;min-width:190px;padding:13px 20px;border:1px solid #8290ff;background:linear-gradient(135deg,#6875f5 0%,#4f46e5 100%);border-radius:12px;color:#fff;text-decoration:none;font-weight:700;box-shadow:0 8px 22px #4f46e540,inset 0 1px #ffffff35;transition:transform .16s ease,box-shadow .16s ease,filter .16s ease}.feedback-link::after{content:"↗";font-size:17px;line-height:1;transition:transform .16s ease}.feedback-link:hover{filter:brightness(1.12);transform:translateY(-2px);box-shadow:0 12px 26px #4f46e566,inset 0 1px #ffffff45}.feedback-link:hover::after{transform:translate(2px,-2px)}.feedback-link:active{transform:translateY(0);filter:brightness(.96)}.feedback-link:focus-visible{outline:3px solid #a5b4fc;outline-offset:4px}.soon{display:inline-flex;align-items:center;gap:8px;padding:8px 12px;border:1px solid #fbbf2440;border-radius:999px;background:#fbbf2410;color:var(--md);font-weight:600}.feedback-grid{grid-template-columns:repeat(2,minmax(0,1fr))}@media(max-width:620px){.feedback-grid{grid-template-columns:1fr}}.analysis-details{margin-top:8px;color:var(--tx)}.analysis-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:5px 14px;margin-top:8px;overflow-wrap:anywhere}.analysis-yara{display:grid;gap:8px;margin-top:10px}.analysis-yara>div{padding:8px;background:#0a111b;border-radius:8px}@media(max-width:620px){.analysis-grid{grid-template-columns:1fr}}
+</style>
+<style>
+/* Keep the two common scan paths visible; group less frequent and higher-impact actions. */
+.scan-primary{display:flex;flex-wrap:wrap;align-items:center;gap:9px;margin-top:14px}
+.scan-more{margin-top:12px;max-width:100%}
+.scan-more>summary{display:inline-flex;align-items:center;gap:8px;min-height:38px;padding:7px 11px;border:1px solid var(--line);border-radius:10px;color:var(--mu);cursor:pointer;list-style:none;transition:background-color .16s ease,border-color .16s ease,color .16s ease}
+.scan-more>summary::-webkit-details-marker{display:none}
+.scan-more>summary::after{content:"＋";font-size:13px;color:var(--ac2)}
+.scan-more[open]>summary::after{content:"−"}
+.scan-more>summary:hover,.scan-more[open]>summary{background:#111b29;border-color:#22d3a855;color:var(--tx)}
+.scan-more .btns{margin-top:10px;max-width:100%}
+.detection-wrap{overflow-x:hidden}
+.detection-table{min-width:0;table-layout:fixed}
+.detection-table th:first-child,.detection-table td:first-child{width:88px}
+.detection-table th:nth-child(2),.detection-table td:nth-child(2){width:108px}
+.detection-table th:nth-child(3),.detection-table td:nth-child(3){width:24%}
+.detection-table th:last-child,.detection-table td:last-child{width:164px}
+.detection-table td:last-child{white-space:normal!important}
+.detection-table td:last-child .b{margin:2px 2px 2px 0;padding:7px 9px}
+@media(max-width:900px){.detection-table th:first-child,.detection-table td:first-child{width:78px}.detection-table th:nth-child(2),.detection-table td:nth-child(2){width:92px}.detection-table th:nth-child(3),.detection-table td:nth-child(3){width:21%}.detection-table th:last-child,.detection-table td:last-child{width:142px}}
+@media(prefers-reduced-motion:reduce){.scan-more>summary{transition:none}}
 </style></head><body>
 <header><span class="brand-logo" aria-label="Luna Guard logo"><img id="brandLogo" alt="" width="52" height="52"></span><div><h1>Luna Guard</h1><small data-i18n="brand.subtitle">Threat protection workspace</small></div>
 <nav id="nav"></nav><label class="language-picker"><span class="lang-flag" id="language-flag" aria-hidden="true"></span><select id="language" aria-label="App language" data-action="language"><option value="th">🇹🇭 ไทย</option><option value="en">🇬🇧 English</option><option value="zh-CN">🇨🇳 简体中文</option></select></label><span class="pill" id="pill">IDLE</span></header>
@@ -42,12 +63,13 @@ dialog.onboarding{max-width:min(560px,calc(100% - 32px));width:560px;border:1px 
 <section class="tab on" id="t-dash">
  <div class="card hero"><svg viewBox="0 0 120 120" width="180" id="ring" role="img" aria-label="Scan status"></svg>
   <div><div class="big" id="status" role="status" aria-live="polite">—</div><div class="mu" id="substatus" aria-live="polite"></div>
-   <div class="btns"><button class="b p" data-i18n="scan.autoFiles" data-action="scan-files">สแกนไฟล์อัตโนมัติ</button><button class="b" data-i18n="scan.quick" data-action="scan-quick">สแกนด่วน (ทุกชั้น)</button><button class="b" data-i18n="scan.full" data-action="scan-full">สแกนทั้งไดรฟ์ C:</button>
+   <div class="scan-primary"><button class="b p" data-i18n="scan.autoFiles" data-action="scan-files">สแกนไฟล์อัตโนมัติ</button><button class="b" data-i18n="scan.quick" data-action="scan-quick">สแกนด่วน (ทุกชั้น)</button><button class="b d" id="stopb" data-i18n="scan.stop" style="display:none" data-action="stop">หยุดสแกน</button></div>
+   <details class="scan-more"><summary data-i18n="scan.moreOptions">ตัวเลือกการสแกนเพิ่มเติม</summary><div class="btns"><button class="b" data-i18n="scan.full" data-action="scan-full">สแกนทั้งไดรฟ์ C:</button>
    <button class="b" data-i18n="scan.deepArchives" data-action="scan-deep-archives">สแกนด่วน + archive ลึก</button>
    <button class="b d" data-i18n="scan.clean" data-action="scan-clean">สแกน + กำจัด</button>
    <button class="b" data-i18n="scan.defenderQuick" data-action="defender-quick">Defender Quick Scan</button>
    <button class="b" data-i18n="scan.defenderFull" data-action="defender-full">Defender Full Scan</button>
-   <button class="b" data-i18n="scan.update" data-action="update">อัปเดตฐานข้อมูล</button><button class="b" data-i18n="scan.selftest" data-action="selftest">ทดสอบตัวเอง</button><button class="b d" id="stopb" data-i18n="scan.stop" style="display:none" data-action="stop">หยุดสแกน</button></div>
+   <button class="b" data-i18n="scan.update" data-action="update">อัปเดตฐานข้อมูล</button><button class="b" data-i18n="scan.selftest" data-action="selftest">ทดสอบตัวเอง</button></div></details>
    <div class="bar" id="busy" style="display:none" role="progressbar" aria-label="Scan in progress" aria-valuetext="In progress"><i></i></div><div class="mu" id="prog" aria-live="polite" style="margin-top:8px;font-size:12px;word-break:break-all"></div></div></div>
  <div class="card" id="ask" style="display:none;border-color:#fbbf2460"></div>
  <div class="stats">

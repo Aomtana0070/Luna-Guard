@@ -11,7 +11,7 @@ The creator, Tanapisit Onsroi, wants to hand the project to a team able to conti
 - Main repository: https://github.com/Aomtana0070/Luna-Guard
 - Releases: https://github.com/Aomtana0070/Luna-Guard/releases
 - Website: https://luna-guard-website.vercel.app/
-- Latest source tag documented here: `v1.6.0` (2026-10-13, per `CHANGELOG.md`).
+- Latest source tag documented here: `v1.6.1` (2026-10-24, per `CHANGELOG.md`).
 - Desktop code: Python, pywebview, YARA integration, PE metadata support, local state and quarantine modules.
 - Companion source: Flutter/Dart, Android and iOS targets.
 - Business: pre-revenue; no financial statements, paying customers, or active-user counts are represented in this public data room.
