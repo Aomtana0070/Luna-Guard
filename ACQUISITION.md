@@ -8,7 +8,7 @@ Luna Guard is an on-demand Windows malware-scanning and quarantine application, 
 
 ## At a glance
 
-- **Latest tagged release:** [v1.6.0](https://github.com/Aomtana0070/Luna-Guard/releases/tag/v1.6.0)
+- **Latest tagged release:** [v1.6.1](https://github.com/Aomtana0070/Luna-Guard/releases/tag/v1.6.1)
 - **Desktop:** Windows scanner, dashboard, YARA rules, threat-feed updates, file analysis, and integrity-checked quarantine.
 - **Companion:** Flutter source for Android and iOS; selected-file, local checks with a deliberately smaller scope than desktop.
 - **Website:** [Luna Guard](https://luna-guard-website.vercel.app/)

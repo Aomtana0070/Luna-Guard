@@ -1,5 +1,12 @@
 # Changelog
 
+## v1.6.1 — 2026-10-24
+
+- Simplify the dashboard's main scan actions and move less common scans into an expandable menu.
+- Keep large detection result tables within the dashboard and improve action-button wrapping.
+- Add translated labels for the scan options menu in Thai, English, and Simplified Chinese.
+- Update Android package version to `1.6.1+11`.
+
 ## v1.6.0 — 2026-10-13
 
 - Correlate file hash reputation, YARA, heuristic, signature, and suspicious metadata into a capped risk score, with the contributing signals explained in the dashboard.

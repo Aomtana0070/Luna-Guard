@@ -17,7 +17,7 @@ This free, source-controlled data room summarizes the current project for prospe
 
 ## Snapshot
 
-- Current repository release: [v1.6.0](https://github.com/Aomtana0070/Luna-Guard/releases/tag/v1.6.0), dated 2026-10-13 in the changelog.
+- Current repository release: [v1.6.1](https://github.com/Aomtana0070/Luna-Guard/releases/tag/v1.6.1), dated 2026-10-24 in the changelog.
 - Business status: pre-revenue. No customer count, active-user count, or revenue is claimed here.
 - The repository currently has no top-level project license. Rights clearance is an open diligence item.
 - Secrets, local user data, quarantine files, and signing credentials are intentionally excluded.
